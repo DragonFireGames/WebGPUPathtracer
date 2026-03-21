@@ -17,14 +17,15 @@ struct Material {
   albedo: vec3f,
   roughness: f32, 
   emittance: vec3f,
-  pad0: f32,
+  material_type: i32,
   // Integer Texture IDs
   albedo_idx: i32,
   normal_idx: i32,
   height_idx: i32,
-  pad1: i32,     
+  roughness_idx: i32,
   uv_scale: vec2f,
-  pad2: vec2f,
+  ior: f32,
+  concentration: f32,
   // Height Params
   height_params: vec4f  // x: norm_mult, y: multiplier, z: samples, w: offset
 };
@@ -353,10 +354,62 @@ fn calculate_shadow_pom(current_uv: vec2f, current_height: f32, light_dir_ts: ve
   return res; 
 }
 
+fn refraction(I: vec3f, N: vec3f, ior: f32, ior2: f32) -> vec3f {
+  var cosi: f32 = clamp(dot(I, N), -1.0, 1.0);
+  var n: vec3f = N;
+  var etai: f32 = ior2;
+  var etat: f32 = ior;
+
+  if (cosi < 0.0) {
+    cosi = -cosi;
+  } else {
+    etai = ior;
+    etat = ior2;
+    n = -N;
+  }
+
+  let eta: f32 = etai / etat;
+  let k: f32 = 1.0 - eta * eta * (1.0 - cosi * cosi);
+  
+  if (k < 0.0) {
+    return vec3f(0.0);
+  } else {
+    return eta * I + (eta * cosi - sqrt(k)) * n;
+  }
+}
+
+fn fresnel(I: vec3f, N: vec3f, ior: f32, ior2: f32) -> f32 {
+  var cosi: f32 = clamp(dot(I, N), -1.0, 1.0);
+  var etai: f32 = ior2;
+  var etat: f32 = ior;
+
+  if (cosi > 0.0) {
+    etai = ior;
+    etat = ior2;
+  }
+
+  // Compute sint using Snell's law
+  let sint: f32 = (etai / etat) * sqrt(max(0.0, 1.0 - cosi * cosi));
+
+  // Total internal reflection
+  if (sint >= 1.0) {
+    return 1.0;
+  } else {
+    let cost: f32 = sqrt(max(0.0, 1.0 - sint * sint));
+    let abs_cosi: f32 = abs(cosi);
+    
+    let Rs: f32 = ((etat * abs_cosi) - (etai * cost)) / ((etat * abs_cosi) + (etai * cost));
+    let Rp: f32 = ((etai * abs_cosi) - (etat * cost)) / ((etai * abs_cosi) + (etat * cost));
+    
+    return (Rs * Rs + Rp * Rp) / 2.0;
+  }
+}
+
 struct SurfaceContext {
   albedo: vec3f,
   normal: vec3f,
   emittance: vec3f,
+  roughness: f32,
 };
 
 fn get_surface_context(hit: SurfaceHit, mat: Material, tbn: mat3x3f, uv: vec2f) -> SurfaceContext {
@@ -378,6 +431,12 @@ fn get_surface_context(hit: SurfaceHit, mat: Material, tbn: mat3x3f, uv: vec2f) 
   if (albedo_idx >= 0) {
     let tex_color = sample_texture(albedo_idx, uv);
     ctx.albedo *= pow(tex_color.rgb, vec3f(2.2)); // sRGB to Linear
+  }
+
+  ctx.roughness = mat.roughness;
+  let roughness_idx = mat.roughness_idx;
+  if (roughness_idx >= 0) {
+    ctx.roughness *= sample_texture(roughness_idx, uv).r;
   }
 
   // 3. Resolve Emittance
@@ -507,11 +566,13 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   var throughput = vec3f(1.0);
   var radiance = vec3f(0.0);
 
-  for (var bounce = 0; bounce < 8; bounce++) {
+  var beers_dist = 0.;
+
+  for (var bounce = 0; bounce < 20; bounce++) {
     var hit = trace_scene(ray);
         
     if (hit.m_idx == -1) {
-      radiance += throughput * vec3f(0.02, 0.03, 0.05);
+      radiance += throughput * vec3f(0.02, 0.03, 2.05);
       break;
     }
 
@@ -520,6 +581,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     var final_n = hit.hit_n;
     let tbn = mat3x3f(hit.tangent, hit.bitangent, hit.hit_n);
     var currentheight = 0.;
+
+    beers_dist += hit.t;
 
     // --- PARALLAX OCCLUSION MAPPING ---
     let height_idx = mat.height_idx;
@@ -537,13 +600,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     radiance += throughput * ctx.emittance;
     if (length(ctx.emittance) > 0.1) { break; }
 
+    /*
     // Use true geometric normal for origin offset to prevent shadow acne from displaced normals
     ray.origin = (ray.origin + ray.direction * hit.t) + hit.hit_n * 0.001;
 
     // Use the final mapped normal for bounce reflection calculation
     let diffuse = normalize(ctx.normal + random_unit_vector());
     let specular = reflect(ray.direction, ctx.normal);
-    ray.direction = normalize(mix(specular, diffuse, mat.roughness));
+    ray.direction = normalize(mix(specular, diffuse, ctx.roughness));
     throughput *= ctx.albedo;
 
     if (HAS_HEIGHTMAPS && height_idx >= 0) {
@@ -559,10 +623,118 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
         let diffuse = normalize(ctx.normal + random_unit_vector());
         let specular = reflect(ray.direction, ctx.normal);
-        ray.direction = normalize(mix(specular, diffuse, mat.roughness));
+        ray.direction = normalize(mix(specular, diffuse, ctx.roughness));
         throughput *= ctx.albedo;
       }
     }
+    */
+    //*
+    // --- POSITION UPDATE ---
+    let hit_pos = ray.origin + ray.direction * hit.t;
+    
+    // --- MATERIAL LOGIC ---
+    var kr: f32 = 0.0;
+    let roughness = ctx.roughness;
+    
+    if (mat.material_type == 2) { // DIELECTRIC (Glass)
+      let cosi = dot(ray.direction, ctx.normal);
+      let entering = cosi < 0.0;
+      var normal = ctx.normal;
+      if (entering) { normal *= -1; }
+      
+      // 1. If we hit the surface from the INSIDE, we are exiting.
+      // Apply Beer's Law to the throughput based on the distance traveled (hit.t)
+      if (entering) {
+        beers_dist = 0;
+      } else {
+        let density = mat.concentration;
+        // Absorption coefficient sigma = -log(albedo)
+        // We use max(albedo, 0.0001) to avoid log(0) which is undefined
+        let sigma = -log(max(ctx.albedo, vec3f(0.0001))) * density;
+        // Beer's Law: attenuation = e^(-sigma * distance)
+        let attenuation = exp(-sigma * beers_dist);
+        let glow = ctx.emittance * (vec3f(1.0) - attenuation);
+        
+        // Add the glow to the accumulated radiance
+        radiance += throughput * glow;
+        throughput *= attenuation;
+      }
+
+      // 2. Standard Fresnel calculation
+      // If entering: ior1=1.0, ior2=mat.ior. If exiting: ior1=mat.ior, ior2=1.0
+      let kr = fresnel(ray.direction, ctx.normal, mat.ior, 1.0);
+      
+      if (rand_pcg() > kr) {
+        // --- REFRACT ---
+        let refracted_dir = refraction(ray.direction, ctx.normal, mat.ior, 1.0);
+        
+        // Apply roughness to the transmission
+        //ray.direction = normalize(mix(refracted_dir, -ctx.normal + random_unit_vector(), roughness));
+        ray.direction = refracted_dir;
+
+        // Nudge: If entering, nudge INTO the mesh. If exiting, nudge OUT of the mesh.
+        // Since ctx.normal always faces the ray, -ctx.normal always pushes "forward"
+        ray.origin = hit_pos + normal * 0.01;
+        
+        // Note: We don't multiply by albedo here because Beer's Law handled it on exit!
+        // If you want "surface tint" in addition to volumetric, you can multiply here too.
+      } else {
+        // --- REFLECT ---
+        let specular = reflect(ray.direction, ctx.normal);
+        ray.direction = normalize(mix(specular, ctx.normal + random_unit_vector(), roughness));
+        
+        // Nudge OUTSIDE
+        ray.origin = hit_pos + ctx.normal * 0.001;
+        
+        // Reflection on glass is usually uncolored (white), so no albedo multiplication
+      }
+    }
+    else if (mat.material_type == 1) { // METAL
+      // Pure specular reflection, colored by albedo
+      let specular = reflect(ray.direction, ctx.normal);
+      ray.direction = normalize(mix(specular, ctx.normal + random_unit_vector(), roughness));
+      
+      ray.origin = hit_pos + ctx.normal * 0.001;
+      throughput *= ctx.albedo;
+    } 
+    else { // OPAQUE / PLASTIC
+      let diffuse = normalize(ctx.normal + random_unit_vector());
+      let specular = reflect(ray.direction, ctx.normal);
+      
+      // Simple Schlick approximation for plastic highlights
+      let F0 = 0.04; 
+      let F = F0 + (1.0 - F0) * pow(1.0 - max(0.0, dot(-ray.direction, ctx.normal)), 5.0);
+      
+      if (rand_pcg() < F) {
+        ray.direction = normalize(mix(specular, ctx.normal + random_unit_vector(), roughness));
+      } else {
+        ray.direction = diffuse;
+      }
+      
+      ray.origin = hit_pos + ctx.normal * 0.001;
+      throughput *= ctx.albedo;
+    }
+
+    // --- HEIGHTMAP / POM LOGIC ---
+    if (HAS_HEIGHTMAPS && mat.height_idx >= 0) {
+      let light_ts = normalize(transpose(tbn) * (ray.direction));
+      let shadow_res = calculate_shadow_pom(final_uv, currentheight, light_ts, mat, mat.height_idx);
+      if (shadow_res.hit) {
+      // Update UV and hit context for the displaced surface
+      final_uv = shadow_res.uv;
+      let ctx_pom = get_surface_context(hit, mat, tbn, final_uv);
+      
+      radiance += throughput * ctx_pom.emittance;
+      if (length(ctx_pom.emittance) > 0.1) { break; }
+      
+      // Re-apply diffuse/specular bounce based on displaced normal
+      let diffuse = normalize(ctx_pom.normal + random_unit_vector());
+      let specular = reflect(ray.direction, ctx_pom.normal);
+      ray.direction = normalize(mix(specular, diffuse, roughness));
+      throughput *= ctx_pom.albedo;
+      }
+    }
+    //*/
 
     // Russian Roulette
     if (bounce < 2) { continue; } 
