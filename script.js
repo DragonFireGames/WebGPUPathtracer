@@ -711,6 +711,8 @@ class Renderer {
 
       // Bulk set UV Scale and Height Params (Indices 12-13 and 16-19)
       matData.set(m.uvScale, base + 12);
+      var ior = m.ior;
+      if (m.type == 0) ior = ((ior-1)/(ior+1)) ** 2;
       matView.setFloat32(byteBase + 56, m.ior, true); // ior (Float index 14)
       matView.setFloat32(byteBase + 60, m.concentration, true); // ior (Float index 15)
       matData.set([m.normalMultiplier, m.heightMultiplier, m.heightSamp, m.heightOffset], base + 16);
