@@ -382,6 +382,7 @@ class Scene {
   constructor(canvas) {
     this.objects = [];
     this.camera = new Camera(canvas);
+    this.bounces = 8;
     this.background = new Material(0,[0.02, 0.03, 0.05], 1.0, [0, 0, 0]);
   }
   newSphere() { var o = new Sphere(...arguments); this.objects.push(o); return o; }
@@ -485,14 +486,14 @@ var SceneList = [
         heightOffset: 0    // Shifts where the surface starts
       });
 
-      var matGlass = new Material(2,[0.2, 0.2, 1.0], 0.0, [0, 0, 0]);
+      var matGlass = new Material(2,[0.2, 0.2, 1.0], 1.0, [0, 0, 0]);
       var matRedGlass = new Material(2,[1.0, 0.2, 0.2], 0.0, [0, 0, 0]);
-      var matUraniumGlass = new Material(2,[0.4, 1.0, 0.4], 1.0, [0, 0.01, 0]);
+      var matUraniumGlass = new Material(2,[0.4, 1.0, 0.4], 0.0, [0, 0.01, 0]);
 
       scene.newPlane(matCeramic, 0, 1, 0, 0);    // Floor (POM Textured)
-      scene.newPlane(matCeramic, 0, -1, 0, -3.5);   // Ceiling
+      scene.newPlane(matMetal, 0, -1, 0, -3.5);   // Ceiling
       scene.newPlane(matMetal, 0, 0, 1, -3.0);    // Back wall
-      scene.newPlane(matMetal, 0, 0, -1, -10.0);    // Front wall
+      scene.newPlane(matWhite, 0, 0, -1, -10.0);    // Front wall
       scene.newPlane(matRed, 1, 0, 0, -2.5);      // Left wall
       scene.newPlane(matGreen, -1, 0, 0, -2.5);   // Right wall
       
@@ -514,6 +515,10 @@ var SceneList = [
       //let box = scene.newCube(toyBox, 0.2, 0.4, -0.2, 1.0, 1.2, 0.6);
       //quat.setAxisAngle(box.rotation, [0, 1, 0], -20 * Math.PI / 180); 
       //box.updateMatrix();
+
+      scene.bounces = 8;
+      canvas.width = 800;
+      canvas.height = 608;
 
       return scene;
     }
@@ -760,7 +765,14 @@ class Renderer {
       compute: { 
         module: shaderModule, 
         entryPoint: 'main',
-        constants: { 0: hasSpheres ? 1 : 0, 1: hasPlanes ? 1 : 0, 2: hasCubes ? 1 : 0, 3: hasMeshes ? 1 : 0, 4: hasHeightMaps ? 1 : 0 }
+        constants: { 
+          0: scene.bounces, 
+          1: hasSpheres ? 1 : 0, 
+          2: hasPlanes ? 1 : 0, 
+          3: hasCubes ? 1 : 0, 
+          4: hasMeshes ? 1 : 0, 
+          5: hasHeightMaps ? 1 : 0 
+        }
       } 
     });
     
@@ -871,6 +883,8 @@ async function init() {
   };
   
   const sppElement = document.getElementById('spp');
+  const blElement = document.getElementById('bl');
+  blElement.innerText = renderer.scene.bounces;
   function render() {
     renderer.render();
     sppElement.innerText = renderer.frame;
