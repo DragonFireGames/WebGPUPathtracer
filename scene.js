@@ -1,6 +1,6 @@
 
 
-var SelectedScene = Number(prompt("Enter a scene number (0-1)")) || 0;
+var SelectedScene = Number(prompt("Enter a scene number (0-3)")) || 0;
 var SceneList = [
   {
     name: "POM & Normals Box",
@@ -201,8 +201,161 @@ var SceneList = [
 
       return scene;
     }
+  },
+  {
+    name: "Glass & Geometry Study",
+    load: async function() {},
+    create: async function(canvas) {
+      canvas.width = 800;
+      canvas.height = 608;
+      var scene = new Scene(canvas);
+      
+      var cam = scene.camera;
+      cam.setPosition(3, 2.5, 5);
+      cam.lookAt(0, 0.8, 0);
+
+      var teapotModel = new ModelData('assets/teapot2.obj');
+      var diamondModel = new ModelData('assets/diamond.obj');
+
+      scene.background = new HDRTexture([0.8,0.85,1,1]);
+
+      await Promise.all([teapotModel.loaded, diamondModel.loaded]);
+
+      // Critical: Smooth the teapot to avoid faceted look
+      teapotModel.renormalize(true);
+      teapotModel.calculateSmoothNormals(true); 
+      teapotModel.generateBVH();
+
+      diamondModel.renormalize(true);
+      diamondModel.generateBVH();
+
+      var matGold = new Material(1, [1.0, 0.8, 0.3], 0.05, [0, 0, 0]);
+      var matDiamond = new Material(2, [1.0, 1.0, 1.0], 0.0, [0, 0, 0], { ior: 2.4 });
+      var matGlass = new Material(2, [0.9, 1.0, 0.9], 0.0, [0, 0, 0], { ior: 1.5 });
+      var matFloor = new Material(0, [0.1, 0.1, 0.1], 0.2, [0, 0, 0]); // Dark glossy floor
+      var matLight = new Material(0, [0,0,0], 1, [20, 18, 15]);
+
+      // Lights
+      scene.newSphere(matLight, 0, 5, 0, 0.5); // Top light
+      scene.newSphere(matLight, 4, 2, 2, 0.2); // Rim light
+
+      scene.newPlane(matFloor, 0, 1, 0, 0);
+
+      // The Smooth Teapot
+      var teapot = scene.newModel(matGold, teapotModel);
+      teapot.scaleMult(1.2, 1.2, 1.2);
+      teapot.translate(0, 1, 0);
+
+      // The Diamonds
+      // scene.newModel(matDiamond, diamondModel).translate(1.5, 0, 1);
+      // scene.newModel(matDiamond, diamondModel).translate(-1.5, 0, 1);
+
+      // NEW FRUSTUM: Using it as a glass pedestal
+      scene.newFrustum(matGlass).orient(0,0,0, 1, 0,1,0, 0.7);
+
+      scene.bounces = 12;
+      return scene;
+    }
+  },
+  {
+    name: "Random Sphere Forest",
+    load: async function() {},
+    create: async function(canvas) {
+      canvas.width = 1024;
+      canvas.height = 768;
+      var scene = new Scene(canvas);
+      
+      // Position camera to look down at the circle
+      scene.camera.setPosition(0, 5, 6);
+      scene.camera.lookAt(0, 0, 0);
+
+      //scene.background = new HDRTexture([0.04,0.04,0.04,1]);
+      scene.background = new HDRTexture('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/venice_sunset_2k.hdr');
+      //scene.background = new HDRTexture('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/abandoned_greenhouse_2k.hdr');
+      await Promise.resolve(scene.background.loaded);
+
+      // 1. Setup Materials
+      var matGround = new Material(0, [0.1, 0.1, 0.1], 0.1, [0, 0, 0]); // Dark glossy floor
+      var matLight = new Material(0, [0, 0, 0], 1, [15, 15, 15]);     // Overheard light
+      
+      // A function to get a random colorful material
+      function getRandomMaterial() {
+        const isEmissive = rng() < 0.15; 
+        if (isEmissive) {
+          const r = rng()*19+1;
+          const g = rng()*19+1;
+          const b = rng()*19+1;
+          return new Material(0, [0, 0, 0], 1.0, [r, g, b]);
+        }
+        const types = [0, 1, 2]; // Diffuse, Metal, Glass
+        const type = types[Math.floor(rng() * types.length)];
+        const color = [rng(), rng(), rng()];
+        const roughness = type != 0 && rng() < 0.3 ? 0 : rng();
+        return new Material(type, color, roughness, [0, 0, 0]);
+      }
+
+
+      // 2. Add Environment
+      scene.newPlane(matGround, 0, 1, 0, 0); // Ground
+      //scene.newSphere(matLight, 0, 10, 0, 1); // Sun/Light source
+      
+      // 3. Generate Non-Intersecting Spheres
+      const spheres = [];
+      const maxSpheres = 40;
+      const spawnRadius = 2.0;
+      const minSize = 0.1;
+      const maxSize = 0.4;
+
+      let attempts = 0;
+      var rng = mulberry32(42);
+      while (spheres.length < maxSpheres && attempts < 1000) {
+        attempts++;
+        
+        // Random position in a circle (Polar coordinates)
+        const angle = rng() * Math.PI * 2;
+        const dist = Math.sqrt(rng()) * spawnRadius;
+        const x = Math.cos(angle) * dist;
+        const z = Math.sin(angle) * dist;
+        const radius = minSize + rng() * (maxSize - minSize);
+        const y = radius; // Sit exactly on the ground
+
+        // Check for intersections
+        let collision = false;
+        for (let s of spheres) {
+          const dx = x - s.x;
+          const dy = y - s.y;
+          const dz = z - s.z;
+          const distance = Math.sqrt(dx*dx + dy*dy + dz*dz);
+          
+          // If distance is less than sum of radii, they overlap
+          if (distance < (radius + s.radius + 0.05)) { // 0.05 buffer
+            collision = true;
+            break;
+          }
+        }
+
+        if (!collision) {
+          const mat = getRandomMaterial();
+          const sphereObj = scene.newSphere(mat, x, y, z, radius);
+          // Store metadata for the next collision check
+          spheres.push({ x, y:y, z, radius });
+        }
+      }
+
+      scene.bounces = 6;
+      return scene;
+    }
   }
 ];
+
+function mulberry32(a) {
+  return function() {
+    let t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  }
+}
 
 // --- MAIN ---
 var renderer;
@@ -258,3 +411,5 @@ async function init() {
 }
 
 init();
+
+
