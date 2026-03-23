@@ -174,6 +174,34 @@ class Primitive {
     mat4.fromRotationTranslationScale(this.matrix, this.rotation, this.position, this.scale);
     mat4.invert(this.invMatrix, this.matrix);
   }
+
+  getWorldAABB() {
+    const worldMatrix = mat4.create();
+    mat4.invert(worldMatrix, this.invMatrix);
+    // Unit sphere is -1 to 1 in local space
+    return transformAABB([-1,-1,-1], [1,1,1], worldMatrix);
+  }
+}
+
+// Helper to transform an AABB by a matrix
+function transformAABB(localMin, localMax, worldMatrix) {
+  const corners = [];
+  for (let x of [localMin[0], localMax[0]]) {
+    for (let y of [localMin[1], localMax[1]]) {
+      for (let z of [localMin[2], localMax[2]]) {
+        const p = vec3.fromValues(x, y, z);
+        vec3.transformMat4(p, p, worldMatrix);
+        corners.push(p);
+      }
+    }
+  }
+  const min = vec3.fromValues(Infinity, Infinity, Infinity);
+  const max = vec3.fromValues(-Infinity, -Infinity, -Infinity);
+  for (let c of corners) {
+    vec3.min(min, min, c);
+    vec3.max(max, max, c);
+  }
+  return { min, max };
 }
 
 class Sphere extends Primitive {
@@ -190,6 +218,7 @@ Sphere.getSchema = function(sphere) {
   return [
     { type:"mat4x4f", data: sphere.invMatrix },
     { type:"i32", data: sphere.material._index },
+    { type:"i32", data: 1 },
   ];
 }
 
@@ -207,6 +236,7 @@ Cube.getSchema = function(cube) {
   return [
     { type:"mat4x4f", data: cube.invMatrix },
     { type:"i32", data: cube.material._index },
+    { type:"i32", data: 2 },
   ];
 }
 
@@ -250,12 +280,21 @@ class Frustum extends Primitive {
     this.updateMatrix();
     return this;
   }
+
+  getWorldAABB() {
+    const worldMatrix = mat4.create();
+    mat4.invert(worldMatrix, this.invMatrix);
+    // Frustum is defined y=0 to y=1, and x/z depends on radii
+    const maxR = Math.max(this.bottomRadius, this.topRadius);
+    return transformAABB([-maxR, 0, -maxR], [maxR, 1, maxR], worldMatrix);
+  }
 }
 Frustum.getSchema = function(frustum) {
   if (!frustum) frustum = {material:{_index:-1}};
   return [
     { type: "mat4x4f", data: frustum.invMatrix },
     { type: "i32", data: frustum.material._index },
+    { type: "i32", data: 3 },
     { type: "f32", data: frustum.top_radius },
   ];
 }
@@ -273,16 +312,25 @@ class Torus extends Primitive {
     this.scaleSet(outer, outer, outer);
     
     // The inner radius (r) must be stored as a ratio relative to the outer radius
-    this.innerRadius = inner / outer; 
+    this.inner_radius = inner / outer; 
     return this;
+  }
+
+  getWorldAABB() {
+    const worldMatrix = mat4.create();
+    mat4.invert(worldMatrix, this.invMatrix);
+    // Torus lies in XZ plane. Local bounds:
+    const r = this.majorRadius + this.minorRadius;
+    return transformAABB([-r, -this.minorRadius, -r], [r, this.minorRadius, r], worldMatrix);
   }
 }
 Torus.getSchema = function(torus) {
-  if (!torus) torus = {material:{_index:-1}, innerRadius: 0};
+  if (!torus) torus = {material:{_index:-1}, inner_radius: 0};
   return [
     { type: "mat4x4f", data: torus.invMatrix },
     { type: "i32", data: torus.material._index },
-    { type: "f32", data: torus.innerRadius },
+    { type: "i32", data: 4 },
+    { type: "f32", data: torus.inner_radius },
   ];
 }
 
@@ -577,6 +625,13 @@ class Model extends Primitive {
     this.model = model;
     this.type = "Model";
   }
+  getWorldAABB() {
+    // Meshes already have a local BVH. We take the root node's AABB.
+    const root = this.model.nodes[0];
+    const worldMatrix = mat4.create();
+    mat4.invert(worldMatrix, this.invMatrix);
+    return transformAABB(root.min, root.max, worldMatrix);
+  }
 }
 Model.getSchema = function(mesh) {
   if (!mesh) mesh = { material: { _index:-1 }, model: { _node_offset: 0, _tri_offset: 0 } };
@@ -586,6 +641,112 @@ Model.getSchema = function(mesh) {
     { type: "u32", data: mesh.model._node_offset },
     { type: "u32", data: mesh.model._tri_offset },
   ];
+}
+
+class SceneBVHBuilder {
+  constructor(objects) {
+    this.objects = objects;
+    this.nodes = [];
+    this.build();
+  }
+
+  build() {
+    if (this.objects.length === 0) return;
+
+    // Create an array of object references with their calculated world bounds
+    const items = this.objects.map((obj, index) => ({
+      index: index, // This is the index in the globalObjectBuffer
+      aabb: obj.getWorldAABB()
+    }));
+
+    this.recursiveBuild(items, 0);
+  }
+
+  recursiveBuild(items, depth) {
+    const nodeIdx = this.nodes.length;
+    
+    // Initialize node with dummy data
+    const node = {
+      min: [0, 0, 0],
+      max: [0, 0, 0],
+      num_objects: 0,
+      object_index: -1,
+      next: -1
+    };
+    this.nodes.push(node);
+
+    // Calculate Bounds for this node
+    const bounds = this.calcBounds(items);
+    node.min = bounds.min;
+    node.max = bounds.max;
+
+    // Leaf Node: Only 1 object left or max depth reached
+    if (items.length <= 1 || depth > 20) {
+      node.num_objects = items.length;
+      node.object_index = items[0].index; // The pointer to globalObjectBuffer
+      return;
+    }
+
+    // Split logic: Find the widest axis
+    const size = vec3.sub(vec3.create(), bounds.max, bounds.min);
+    let axis = 0;
+    if (size[1] > size[0]) axis = 1;
+    if (size[2] > size[axis]) axis = 2;
+
+    // Sort items by the center of their AABB on the chosen axis
+    items.sort((a, b) => {
+      const centerA = (a.aabb.min[axis] + a.aabb.max[axis]) * 0.5;
+      const centerB = (b.aabb.min[axis] + b.aabb.max[axis]) * 0.5;
+      return centerA - centerB;
+    });
+
+    const mid = Math.floor(items.length / 2);
+    
+    // Left child is always current_index + 1
+    this.recursiveBuild(items.slice(0, mid), depth + 1);
+    
+    // Right child index needs to be stored in 'next'
+    node.next = this.nodes.length;
+    this.recursiveBuild(items.slice(mid), depth + 1);
+  }
+
+  calcBounds(items) {
+    const min = vec3.fromValues(Infinity, Infinity, Infinity);
+    const max = vec3.fromValues(-Infinity, -Infinity, -Infinity);
+    for (const item of items) {
+      vec3.min(min, min, item.aabb.min);
+      vec3.max(max, max, item.aabb.max);
+    }
+    return { min, max };
+  }
+
+  flatten() {
+    // Each node is 8 floats (32 bytes):
+    // [min.x, min.y, min.z, num_objects]
+    // [max.x, max.y, max.z, next_node_index/object_index]
+    const data = new Float32Array(this.nodes.length * 8);
+    const view = new DataView(data.buffer);
+
+    for (let i = 0; i < this.nodes.length; i++) {
+      const n = this.nodes[i];
+      const base = i * 8;
+      
+      data[base + 0] = n.min[0];
+      data[base + 1] = n.min[1];
+      data[base + 2] = n.min[2];
+      // num_objects is stored as a bitcast uint32 in the 4th float slot
+      view.setUint32((base + 3) * 4, n.num_objects, true);
+
+      data[base + 4] = n.max[0];
+      data[base + 5] = n.max[1];
+      data[base + 6] = n.max[2];
+      
+      // If leaf, store object index. If branch, store index of right child.
+      const ptr = (n.num_objects > 0) ? n.object_index : n.next;
+      view.setUint32((base + 7) * 4, ptr, true);
+    }
+    return data;
+  }
 }
 
 class Scene {
@@ -601,7 +762,6 @@ class Scene {
   newFrustum() { var o = new Frustum(...arguments); this.objects.push(o); return o; }
   newTorus() { var o = new Torus(...arguments); this.objects.push(o); return o; }
   newModel() { var o = new Model(...arguments); this.objects.push(o); return o; }
-  
   getMaterials() {
     var list = this.objects;
     var mats = [];
@@ -611,7 +771,6 @@ class Scene {
     }
     return mats;
   }
-
   getTextures() {
     var mats = this.getMaterials();
     var texs = [];
@@ -808,8 +967,6 @@ class Renderer {
     });
 
     // --- 1. EXTRACT & PACK MATERIALS ---
-    
-    // --- 1. EXTRACT & PACK MATERIALS ---
     const mats = scene.getMaterials();
     var hasHeightMaps = false;
     mats.forEach((m, i) => {
@@ -818,25 +975,20 @@ class Renderer {
     });
     const { data: matData, size: matSize } = this.packDataFromSchema(mats,Material.getSchema);
 
-    const spheres = scene.objects.filter(o => o.type === "Sphere");
-    const hasSpheres = spheres.length > 0;
-    const { data: sphereData, size: sphereSize } = this.packDataFromSchema(spheres,Sphere.getSchema);
-
-    const cubes = scene.objects.filter(o => o.type === "Cube");
-    const hasCubes = cubes.length > 0;
-    const { data: cubeData, size: cubeSize } = this.packDataFromSchema(cubes,Cube.getSchema);
+    const hasSpheres = scene.objects.some(o => o.type === "Sphere");
+    const hasCubes = scene.objects.some(o => o.type === "Cube");
+    const hasFrustums = scene.objects.some(o => o.type === "Frustum");
+    const hasTori = scene.objects.some(o => o.type === "Torus");
+    const bvh = new SceneBVHBuilder(scene.objects.filter(o => ["Sphere","Cube","Frustum","Torus"].includes(o.type)));
+    const { data: objectData, size: objectSize } = this.packDataFromSchema(bvh.objects,(obj)=>{
+      if (!obj) obj = new Sphere({_index:-1},0,0,0,1);
+      return obj.constructor.getSchema(obj);
+    });
+    const tlasData = bvh.flatten();
 
     const planes = scene.objects.filter(o => o.type === "Plane");
     const hasPlanes = planes.length > 0;
     const { data: planeData, size: planeSize } = this.packDataFromSchema(planes,Plane.getSchema);
-    
-    const frustums = scene.objects.filter(o => o.type === "Frustum");
-    const hasFrustums = frustums.length > 0;
-    const { data: frustumData, size: frustumSize } = this.packDataFromSchema(frustums,Frustum.getSchema);
-    
-    const tori = scene.objects.filter(o => o.type === "Torus");
-    const hasTori = tori.length > 0;
-    const { data: torusData, size: torusSize } = this.packDataFromSchema(tori,Torus.getSchema);
     
     const makeBuf = (data, minSize = 16) => {
       const size = Math.max(minSize, data.byteLength);
@@ -908,11 +1060,9 @@ class Renderer {
     const bvhBuffer = makeBuf(bvhData, 32);
     const triangleBuffer = makeBuf(triData, 128);
     const matBuffer = makeBuf(matData, matSize);
-    const sphereBuffer = makeBuf(sphereData, sphereSize);
-    const cubeBuffer = makeBuf(cubeData, cubeSize);
+    const objectBuffer = makeBuf(objectData, objectSize);
+    const tlasBuffer = makeBuf(tlasData, 32);
     const planeBuffer = makeBuf(planeData, planeSize);
-    const frustumBuffer = makeBuf(frustumData, frustumSize);
-    const torusBuffer = makeBuf(torusData, torusSize);
 
     const uBuf = this.uBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const aBuf = device.createBuffer({ size: canvas.width * canvas.height * 16, usage: GPUBufferUsage.STORAGE });
@@ -962,28 +1112,18 @@ class Renderer {
         { binding: 1, resource: { buffer: aBuf } },
         { binding: 2, resource: tex.createView() }, 
         { binding: 3, resource: { buffer: matBuffer } },
-        { binding: 4, resource: { buffer: meshBuffer } },
-        { binding: 5, resource: { buffer: bvhBuffer } },
-        { binding: 6, resource: { buffer: triangleBuffer } },
-        // Primitives
-        { binding: 7, resource: { buffer: sphereBuffer } }, 
-        { binding: 8, resource: { buffer: cubeBuffer } },
+        { binding: 4, resource: { buffer: objectBuffer } }, 
+        { binding: 5, resource: { buffer: tlasBuffer } },
+        { binding: 6, resource: { buffer: meshBuffer } },
+        { binding: 7, resource: { buffer: bvhBuffer } },
+        { binding: 8, resource: { buffer: triangleBuffer } },
         { binding: 9, resource: { buffer: planeBuffer } },
-        { binding: 10, resource: { buffer: frustumBuffer } },
-        { binding: 11, resource: { buffer: torusBuffer } },
         // Expanded Texture Bindings
-        { binding: 12, resource: gpuTextures[0].createView() },
-        { binding: 13, resource: gpuTextures[1].createView() },
-        { binding: 14, resource: gpuTextures[2].createView() },
-        { binding: 15, resource: gpuTextures[3].createView() },
-        { binding: 16, resource: gpuTextures[4].createView() },
-        { binding: 17, resource: gpuTextures[5].createView() },
-        { binding: 18, resource: gpuTextures[6].createView() },
-        { binding: 19, resource: gpuTextures[7].createView() },
-        { binding: 20, resource: sampler },
+        ...gpuTextures.map((t, i) => ({ binding: 10 + i, resource: t.createView() })),
+        { binding: 18, resource: sampler },
         //
-        { binding: 21, resource: hdrTextureView },
-        { binding: 22, resource: skySampler }
+        { binding: 19, resource: hdrTextureView },
+        { binding: 20, resource: skySampler }
       ]
     });
 
