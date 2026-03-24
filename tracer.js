@@ -212,6 +212,22 @@ class Sphere extends Primitive {
     vec3.set(this.scale, radius, radius, radius);
     this.updateMatrix();
   }
+  getWorldAABB() {
+    const m = this.matrix;
+
+    // The half-extents of a transformed sphere (ellipsoid) 
+    // are the lengths of the basis vectors of the transformation.
+    const ex = Math.sqrt(m[0]*m[0] + m[4]*m[4] + m[8]*m[8]);
+    const ey = Math.sqrt(m[1]*m[1] + m[5]*m[5] + m[9]*m[9]);
+    const ez = Math.sqrt(m[2]*m[2] + m[6]*m[6] + m[10]*m[10]);
+
+    const center = vec3.fromValues(m[12], m[13], m[14]);
+
+    return {
+      min: vec3.fromValues(center[0] - ex, center[1] - ey, center[2] - ez),
+      max: vec3.fromValues(center[0] + ex, center[1] + ey, center[2] + ez)
+    };
+  }
 }
 Sphere.getSchema = function(sphere) {
   if (!sphere) sphere = {material:{_index:-1}};
@@ -281,12 +297,42 @@ class Frustum extends Primitive {
     return this;
   }
 
+  // getWorldAABB() {
+  //   const worldMatrix = mat4.create();
+  //   mat4.invert(worldMatrix, this.invMatrix);
+  //   // Frustum is defined y=0 to y=1, and x/z depends on radii
+  //   const maxR = this.top_radius;
+  //   return transformAABB([-maxR, 0, -maxR], [maxR, 1, maxR], worldMatrix);
+  // }
   getWorldAABB() {
-    const worldMatrix = mat4.create();
-    mat4.invert(worldMatrix, this.invMatrix);
-    // Frustum is defined y=0 to y=1, and x/z depends on radii
-    const maxR = Math.max(this.bottomRadius, this.topRadius);
-    return transformAABB([-maxR, 0, -maxR], [maxR, 1, maxR], worldMatrix);
+    const m = this.matrix; 
+
+    const getCircleAABB = (yLocal, radius) => {
+      // Correctly access the basis vectors: 
+      // Column 0 (m[0,1,2]) is Local X
+      // Column 2 (m[8,9,10]) is Local Z
+      const ex = Math.sqrt(Math.pow(radius * m[0], 2) + Math.pow(radius * m[8], 2));
+      const ey = Math.sqrt(Math.pow(radius * m[1], 2) + Math.pow(radius * m[9], 2));
+      const ez = Math.sqrt(Math.pow(radius * m[2], 2) + Math.pow(radius * m[10], 2));
+
+      const worldCenter = vec3.transformMat4(vec3.create(), vec3.fromValues(0, yLocal, 0), m);
+
+      return {
+        min: vec3.fromValues(worldCenter[0] - ex, worldCenter[1] - ey, worldCenter[2] - ez),
+        max: vec3.fromValues(worldCenter[0] + ex, worldCenter[1] + ey, worldCenter[2] + ez)
+      };
+    };
+
+    const b = getCircleAABB(0, 1);
+    const t = getCircleAABB(1, this.top_radius);
+
+    // Final Union
+    const finalMin = vec3.create();
+    const finalMax = vec3.create();
+    vec3.min(finalMin, b.min, t.min);
+    vec3.max(finalMax, b.max, t.max);
+
+    return { min: finalMin, max: finalMax };
   }
 }
 Frustum.getSchema = function(frustum) {
@@ -316,12 +362,51 @@ class Torus extends Primitive {
     return this;
   }
 
+  // getWorldAABB() {
+  //   const worldMatrix = mat4.create();
+  //   mat4.invert(worldMatrix, this.invMatrix);
+  //   // Torus lies in XZ plane. Local bounds:
+  //   const r = 1 + this.inner_radius;
+  //   return transformAABB([-r, -this.inner_radius, -r], [r, this.inner_radius, r], worldMatrix);
+  // }
   getWorldAABB() {
-    const worldMatrix = mat4.create();
-    mat4.invert(worldMatrix, this.invMatrix);
-    // Torus lies in XZ plane. Local bounds:
-    const r = this.majorRadius + this.minorRadius;
-    return transformAABB([-r, -this.minorRadius, -r], [r, this.minorRadius, r], worldMatrix);
+    const m = this.matrix; // Local to World
+    const R = 1.0;            // Major Radius (per your prompt)
+    const r = this.inner_radius; // Minor Radius (thickness)
+
+    // 1. Calculate the AABB of the Major Ring (the central spine of the torus)
+    // This is an analytical ellipse in 3D space.
+    const ex = Math.sqrt(Math.pow(R * m[0], 2) + Math.pow(R * m[8], 2));
+    const ey = Math.sqrt(Math.pow(R * m[1], 2) + Math.pow(R * m[9], 2));
+    const ez = Math.sqrt(Math.pow(R * m[2], 2) + Math.pow(R * m[10], 2));
+
+    const worldCenter = vec3.transformMat4(vec3.create(), vec3.fromValues(0, 0, 0), m);
+
+    // 2. Expand the Ellipse AABB by the Minor Radius 'r'
+    // Since the minor radius extends in all directions from the ring, 
+    // we must account for how 'r' projects into world space.
+    
+    // To be perfectly tight, we find the maximum scale of the matrix 
+    // to ensure the 'thickness' is correctly represented if scaled.
+    const scaleX = Math.sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2]);
+    const scaleY = Math.sqrt(m[4]*m[4] + m[5]*m[5] + m[6]*m[6]);
+    const scaleZ = Math.sqrt(m[8]*m[8] + m[9]*m[9] + m[10]*m[10]);
+    const maxScale = Math.max(scaleX, scaleY, scaleZ);
+    
+    const thickness = r * maxScale;
+
+    return {
+      min: vec3.fromValues(
+        worldCenter[0] - ex - thickness, 
+        worldCenter[1] - ey - thickness, 
+        worldCenter[2] - ez - thickness
+      ),
+      max: vec3.fromValues(
+        worldCenter[0] + ex + thickness, 
+        worldCenter[1] + ey + thickness, 
+        worldCenter[2] + ez + thickness
+      )
+    };
   }
 }
 Torus.getSchema = function(torus) {
@@ -620,17 +705,53 @@ class ModelData {
 }
 
 class Model extends Primitive {
-  constructor(material, model) {
+  constructor(material, model, inSceneBVH) {
     super(material);
     this.model = model;
+    this.inSceneBVH = inSceneBVH;
     this.type = "Model";
   }
+  // getWorldAABB() {
+  //   // Meshes already have a local BVH. We take the root node's AABB.
+  //   const root = this.model.nodes[0];
+  //   const worldMatrix = mat4.create();
+  //   mat4.invert(worldMatrix, this.invMatrix);
+  //   return transformAABB(root.min, root.max, worldMatrix);
+  // }
   getWorldAABB() {
-    // Meshes already have a local BVH. We take the root node's AABB.
-    const root = this.model.nodes[0];
     const worldMatrix = mat4.create();
     mat4.invert(worldMatrix, this.invMatrix);
-    return transformAABB(root.min, root.max, worldMatrix);
+    
+    const triangles = this.model.triangles;
+    const threshold = 5000;
+
+    if (triangles.length > 0 && triangles.length < threshold) {
+      // --- PRECISE METHOD: Transform every unique vertex ---
+      let min = vec3.fromValues(Infinity, Infinity, Infinity);
+      let max = vec3.fromValues(-Infinity, -Infinity, -Infinity);
+      
+      const tempV = vec3.create();
+
+      for (let i = 0; i < triangles.length; i++) {
+        const tri = triangles[i];
+        // Check all 3 vertices of the triangle
+        const verts = [tri.v0, tri.v1, tri.v2];
+        
+        for (let v of verts) {
+          vec3.set(tempV, v[0], v[1], v[2]);
+          vec3.transformMat4(tempV, tempV, worldMatrix);
+          
+          vec3.min(min, min, tempV);
+          vec3.max(max, max, tempV);
+        }
+      }
+      return { min, max };
+    } else {
+      // --- FAST METHOD: 8 Corners of the local BVH root ---
+      const root = this.model.nodes[0];
+      // Reuse your transformAABB helper from earlier
+      return transformAABB(root.min, root.max, worldMatrix);
+    }
   }
 }
 Model.getSchema = function(mesh) {
@@ -638,6 +759,7 @@ Model.getSchema = function(mesh) {
   return [
     { type: "mat4x4f", data: mesh.invMatrix },
     { type: "i32", data: mesh.material._index },
+    { type: "i32", data: 0 },
     { type: "u32", data: mesh.model._node_offset },
     { type: "u32", data: mesh.model._tri_offset },
   ];
@@ -975,35 +1097,9 @@ class Renderer {
     });
     const { data: matData, size: matSize } = this.packDataFromSchema(mats,Material.getSchema);
 
-    const hasSpheres = scene.objects.some(o => o.type === "Sphere");
-    const hasCubes = scene.objects.some(o => o.type === "Cube");
-    const hasFrustums = scene.objects.some(o => o.type === "Frustum");
-    const hasTori = scene.objects.some(o => o.type === "Torus");
-    const bvh = new SceneBVHBuilder(scene.objects.filter(o => ["Sphere","Cube","Frustum","Torus"].includes(o.type)));
-    const { data: objectData, size: objectSize } = this.packDataFromSchema(bvh.objects,(obj)=>{
-      if (!obj) obj = new Sphere({_index:-1},0,0,0,1);
-      return obj.constructor.getSchema(obj);
-    });
-    const tlasData = bvh.flatten();
-
-    const planes = scene.objects.filter(o => o.type === "Plane");
-    const hasPlanes = planes.length > 0;
-    const { data: planeData, size: planeSize } = this.packDataFromSchema(planes,Plane.getSchema);
-    
-    const makeBuf = (data, minSize = 16) => {
-      const size = Math.max(minSize, data.byteLength);
-      const b = this.device.createBuffer({ 
-        size: size, 
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST 
-      });
-      if (data.byteLength > 0) this.device.queue.writeBuffer(b, 0, data);
-      return b;
-    };
-
     // --- 1. PRE-CALCULATE TOTALS ---
     const modelObjects = scene.objects.filter(o => o.type === "Model");
-    const hasMeshes = modelObjects.length > 0;
-        
+    
     // Get a list of unique ModelData instances
     const uniqueModels = [];
     modelObjects.forEach(obj => {
@@ -1052,8 +1148,40 @@ class Renderer {
       });
     });
 
+
+    const hasSpheres = scene.objects.some(o => o.type === "Sphere");
+    const hasCubes = scene.objects.some(o => o.type === "Cube");
+    const hasFrustums = scene.objects.some(o => o.type === "Frustum");
+    const hasTori = scene.objects.some(o => o.type === "Torus");
+    const objects = scene.objects.filter(o => ["Sphere","Cube","Frustum","Torus"].includes(o.type));
+    const models = modelObjects.filter(v=>v.inSceneBVH);
+    const hasMeshes = models.length > 0;
+    const bvh = new SceneBVHBuilder(objects.concat(models));
+    console.log(bvh);
+    const { data: objectData, size: objectSize } = this.packDataFromSchema(bvh.objects,(obj)=>{
+      if (!obj) obj = new Sphere({_index:-1},0,0,0,1);
+      return obj.constructor.getSchema(obj);
+    });
+    const tlasData = bvh.flatten();
+
+    const planes = scene.objects.filter(o => o.type === "Plane");
+    const hasPlanes = planes.length > 0;
+    const { data: planeData, size: planeSize } = this.packDataFromSchema(planes,Plane.getSchema);
+    
+    const makeBuf = (data, minSize = 16) => {
+      const size = Math.max(minSize, data.byteLength);
+      const b = this.device.createBuffer({ 
+        size: size, 
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST 
+      });
+      if (data.byteLength > 0) this.device.queue.writeBuffer(b, 0, data);
+      return b;
+    };
+
     // --- 4. FILL MESH INSTANCES ---
-    const { data: meshData, size: meshSize } = this.packDataFromSchema(modelObjects,Model.getSchema);
+    const listModels = modelObjects.filter(v=>!v.inSceneBVH);
+    const hasListMeshes = listModels.length > 0;
+    const { data: meshData, size: meshSize } = this.packDataFromSchema(listModels,Model.getSchema);
 
     // --- 5. CREATE THE BUFFERS ---
     const meshBuffer = makeBuf(meshData, meshSize);
@@ -1093,8 +1221,9 @@ class Renderer {
           4: hasFrustums ? 1 : 0, 
           5: hasTori ? 1 : 0, 
           6: hasMeshes ? 1 : 0, 
-          7: hasHeightMaps ? 1 : 0,
-          8: hasSkybox ? 1 : 0,
+          7: hasListMeshes ? 1 : 0, 
+          8: hasHeightMaps ? 1 : 0,
+          9: hasSkybox ? 1 : 0,
         }
       } 
     });
