@@ -136,14 +136,15 @@ fn random_unit_vector() -> vec3f {
 }
 
 fn sample_texture(idx: i32, uv: vec2f) -> vec4f {
-  if (idx == 0) { return textureSampleLevel(t0, texture_sampler, uv, 0.0); }
-  else if (idx == 1) { return textureSampleLevel(t1, texture_sampler, uv, 0.0); }
-  else if (idx == 2) { return textureSampleLevel(t2, texture_sampler, uv, 0.0); }
-  else if (idx == 3) { return textureSampleLevel(t3, texture_sampler, uv, 0.0); }
-  else if (idx == 4) { return textureSampleLevel(t4, texture_sampler, uv, 0.0); }
-  else if (idx == 5) { return textureSampleLevel(t5, texture_sampler, uv, 0.0); }
-  else if (idx == 6) { return textureSampleLevel(t6, texture_sampler, uv, 0.0); }
-  else if (idx == 7) { return textureSampleLevel(t7, texture_sampler, uv, 0.0); }
+  let nuv = vec2f(uv.x,1.-uv.y);
+  if (idx == 0) { return textureSampleLevel(t0, texture_sampler, nuv, 0.0); }
+  else if (idx == 1) { return textureSampleLevel(t1, texture_sampler, nuv, 0.0); }
+  else if (idx == 2) { return textureSampleLevel(t2, texture_sampler, nuv, 0.0); }
+  else if (idx == 3) { return textureSampleLevel(t3, texture_sampler, nuv, 0.0); }
+  else if (idx == 4) { return textureSampleLevel(t4, texture_sampler, nuv, 0.0); }
+  else if (idx == 5) { return textureSampleLevel(t5, texture_sampler, nuv, 0.0); }
+  else if (idx == 6) { return textureSampleLevel(t6, texture_sampler, nuv, 0.0); }
+  else if (idx == 7) { return textureSampleLevel(t7, texture_sampler, nuv, 0.0); }
   return vec4f(1.0);
 }
 

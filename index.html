@@ -6,14 +6,112 @@
     <link rel="stylesheet" type="text/css" href="style.css">
     <script src="lib/gl-matrix-min.js"></script>
     <script src="lib/parse-hdr.js"></script>
+    <script src="lib/lil-gui.js"></script>
   </head>
   <body>
-    <canvas id="gpuCanvas" width="800" height="608"></canvas><div id="stats">
-      <b>Samples:</b> <span id="spp">0</span><br>
-      <b>Bounces:</b> <span id="bl">8</span>
+
+    <div id="toolbar">
+      <div style="font-weight: 900; color: var(--accent); margin-right: 12px;">Blender in a Browser</div>
+      <button class="tool-btn active" id="tool-t">Translate [T]</button>
+      <button class="tool-btn" id="tool-r">Rotate [R]</button>
+      <button class="tool-btn" id="tool-s">Scale [S]</button>
+      <div style="flex:1"></div>
+
+
+      <button class="tool-btn" id="loadScene" onclick="loadScene()">Load Preset</button>
+      <button class="tool-btn" id="openModal" onclick="openRenderPopup()">Render</button>
+      
+      <!-- NEW: Primitive Spawner Dropdown -->
+      <select id="primitiveSelect" class="tool-btn" style="background:var(--accent); color:white; border:none; font-weight:bold;">
+        <option value="" disabled selected style="display: none;">+ Add Primitive</option>
+        <option value="cube">+ Add Cube</option>
+        <option value="sphere">+ Add Sphere</option>
+        <option value="cylinder">+ Add Cylinder</option>
+        <option value="torus">+ Add Torus</option>
+        <option value="plane">+ Add Plane</option>
+      </select>
     </div>
-    <div class="label">WebGPU Path Tracer</div>
+
+    <div id="main-container">
+      <div id="left-panel">
+        <div class="panel-header">Hierarchy</div>
+        <div id="node-list" class="scroll-area"></div>
+      </div>
+      <div class="gutter-v" id="gutter-left"></div>
+      <div id="center-viewport">
+        <canvas id="glcanvas"></canvas>
+        <div class="controls-hint">LMB: Orbit • RMB/Shift+LMB: Pan • Scroll: Zoom</div>
+      </div>
+      <div class="gutter-v" id="gutter-right"></div>
+      <div id="right-panel">
+        <div class="panel-header">Inspector</div>
+        <div id="gui-root" class="scroll-area"></div>
+      </div>
+    </div>
+
+    <div class="gutter-h" id="gutter-bottom"></div>
+    <div id="bottom-panel">
+      <div class="panel-header">
+        Assets
+        <div style="display:flex; gap:4px;">
+          <button class="btn-small" onclick="createMaterial()">+ Material</button>
+          <button class="btn-small" onclick="document.getElementById('fileInput').click()">Upload</button>
+          <input type="file" id="fileInput" style="display:none" multiple onchange="handleUpload(this)">
+        </div>
+      </div>
+      <div class="scroll-area">
+        <div id="asset-list" class="asset-grid"></div>
+      </div>
+    </div>
+
+    <div id="context-menu">
+      <div class="context-item" id="ctx-delete">Delete</div>
+    </div>
+
+    <div id="render-modal" class="modal-overlay" style="display:none;">
+      <div class="render-popup">
+        <div class="render-header">
+          <span>High Quality Render</span>
+          <button class="close-btn" onclick="closeRenderPopup();">&times;</button>
+        </div>
+
+        <div class="render-body">
+          <div class="canvas-container">
+            <canvas id="gpuCanvas"></canvas>
+          </div>
+
+          <div class="render-controls">
+            <div class="control-group">
+              <label>Resolution</label>
+              <div class="input-row">
+                <input type="number" id="render-w" value="1280" placeholder="W">
+                <span>&times;</span>
+                <input type="number" id="render-h" value="720" placeholder="H">
+              </div>
+            </div>
+
+            <div class="control-group">
+              <label>Samples per Pixel</label>
+              <span id="spp">0</span><br>
+            </div>
+
+            <div class="control-group">
+              <label>Max Bounces</label>
+              <input type="number" id="render-bounces" value="8">
+            </div>
+
+            <button id="btn-start-render" class="render-btn" onclick="startRender();">START RENDER</button>
+            
+            <div class="render-status">
+              <p id="render-stats">Status: Ready</p>
+              <div class="progress-bar"><div id="render-progress"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
     <script src="tracer.js"></script>
+    <script src="gui.js"></script>
     <script src="scene.js"></script>
   </body>
 </html>

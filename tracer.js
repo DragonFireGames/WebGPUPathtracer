@@ -1,9 +1,12 @@
 //import { vec3, mat4, quat } from 'https://cdn.jsdelivr.net/npm/gl-matrix@3.4.3/+esm';
-const { vec3, mat4, quat } = glMatrix;
+const { vec3, vec4, mat4, quat } = glMatrix;
 
 // --- SCENE DEFINITION ---
 class Texture {
-  constructor(url) {
+  constructor(url,name) {
+    this.id = 'texture_' + Math.random().toString(36).substr(2, 9);
+    this.name = name || "New Texture";
+
     this.url = url;
     this.image = new Image();
     this.image.crossOrigin = "anonymous";
@@ -17,8 +20,10 @@ class Texture {
 }
 
 class HDRTexture {
-  constructor(url) {
+  constructor(url,name) {
+    this.id = 'hdrtexture_' + Math.random().toString(36).substr(2, 9);
     this.url = url;
+    this.name = name || "New HDR Texture";
     this.width = 1;
     this.height = 1;
     this.data = new Float16Array([0.02,0.03,0.05,1.0]); // Float16Array
@@ -58,11 +63,15 @@ class HDRTexture {
 }
 
 class Material {
-  constructor(type, color, roughness, emittance, options = {}) {
+  constructor(name, type, color, roughness, emittance, options = {}) {
+    this.id = 'material_' + Math.random().toString(36).substr(2, 9);
+    this.name = name || "New Material";
+
     this.type = type;
     this.color = color;
     this.roughness = roughness;
     this.emittance = emittance;
+    this.emissionIntensity = 1;
     
     // Extended Texture Support
     this.albedoTex = options.albedoTex || null;
@@ -90,7 +99,7 @@ Material.getSchema = function(m) {
   return [
     {type: "vec3f", data: m.color},
     {type: "f32", data: m.roughness},
-    {type: "vec3f", data: m.emittance},
+    {type: "vec3f", data: m.emittance?m.emittance.map(v=>v*m.emissionIntensity):[0,0,0]},
     {type: "i32", data: m.type},
     {type: "i32", data: aIdx},
     {type: "i32", data: nIdx},
@@ -103,15 +112,57 @@ Material.getSchema = function(m) {
   ];
 }
 
+// Helper to transform an AABB by a matrix
+function transformAABB(localMin, localMax, worldMatrix) {
+  const corners = [];
+  for (let x of [localMin[0], localMax[0]]) {
+    for (let y of [localMin[1], localMax[1]]) {
+      for (let z of [localMin[2], localMax[2]]) {
+        const p = vec3.fromValues(x, y, z);
+        vec3.transformMat4(p, p, worldMatrix);
+        corners.push(p);
+      }
+    }
+  }
+  const min = vec3.fromValues(Infinity, Infinity, Infinity);
+  const max = vec3.fromValues(-Infinity, -Infinity, -Infinity);
+  for (let c of corners) {
+    vec3.min(min, min, c);
+    vec3.max(max, max, c);
+  }
+  return { min, max };
+}
+
 class Primitive {
-  constructor(material) {
+  constructor(material,type) {
+    this.id = 'obj_' + Math.random().toString(36).substr(2, 9);
+    this.name = "New " + type;
+    this.type = type;
+    this.icon = "📦";
+
     this.material = material;
     this.position = vec3.create();
     this.scale = vec3.fromValues(1, 1, 1);
     this.rotation = quat.create(); 
     this.matrix = mat4.create();
     this.invMatrix = mat4.create();
+
+    this.vaoData = null; 
+    this.needsMeshUpdate = true;
   }
+
+  updatePreview(gl) {
+    if (!this.needsMeshUpdate) return;
+    const mesh = this.generateMesh();
+    // Assuming window.createVAO exists to handle gl.bufferData
+    if (this.vaoData) { /* cleanup old buffers here if needed */ }
+    this.vaoData = window.createVAOWithBuffers(mesh.p, mesh.n, mesh.i, mesh.u);
+    this.needsMeshUpdate = false;
+  }
+
+  // To be overridden by children
+  generateMesh() { return { p:[], n:[], u:[], i:[] }; }
+
   translate(x, y, z) {
     vec3.add(this.position, this.position, [x, y, z]);
     this.updateMatrix();
@@ -175,7 +226,7 @@ class Primitive {
     mat4.invert(this.invMatrix, this.matrix);
   }
 
-  getWorldAABB() {
+  getBounds() {
     const worldMatrix = mat4.create();
     mat4.invert(worldMatrix, this.invMatrix);
     // Unit sphere is -1 to 1 in local space
@@ -183,36 +234,37 @@ class Primitive {
   }
 }
 
-// Helper to transform an AABB by a matrix
-function transformAABB(localMin, localMax, worldMatrix) {
-  const corners = [];
-  for (let x of [localMin[0], localMax[0]]) {
-    for (let y of [localMin[1], localMax[1]]) {
-      for (let z of [localMin[2], localMax[2]]) {
-        const p = vec3.fromValues(x, y, z);
-        vec3.transformMat4(p, p, worldMatrix);
-        corners.push(p);
-      }
-    }
-  }
-  const min = vec3.fromValues(Infinity, Infinity, Infinity);
-  const max = vec3.fromValues(-Infinity, -Infinity, -Infinity);
-  for (let c of corners) {
-    vec3.min(min, min, c);
-    vec3.max(max, max, c);
-  }
-  return { min, max };
-}
-
 class Sphere extends Primitive {
   constructor(material, x, y, z, radius) {
-    super(material);
-    this.type = "Sphere";
+    super(material,"Sphere");
+    this.icon = "⚽";
     vec3.set(this.position, x, y, z);
     vec3.set(this.scale, radius, radius, radius);
     this.updateMatrix();
   }
-  getWorldAABB() {
+  generateMesh(segs = 32) {
+    const p = [], n = [], u = [], i = [];
+    for (let y = 0; y <= segs; y++) {
+      const v = y / segs, phi = v * Math.PI;
+      for (let x = 0; x <= segs; x++) {
+        const uVal = x / segs, theta = uVal * Math.PI * 2;
+        const nx = Math.sin(phi) * Math.cos(theta);
+        const ny = Math.cos(phi);
+        const nz = Math.sin(phi) * Math.sin(theta);
+        p.push(nx, ny, nz); // Local unit sphere, scale handles the rest
+        n.push(nx, ny, nz);
+        u.push(uVal, v);
+      }
+    }
+    for (let y = 0; y < segs; y++) {
+      for (let x = 0; x < segs; x++) {
+        const a = y * (segs + 1) + x, b = a + 1, c = a + (segs + 1), d = c + 1;
+        i.push(a, b, d, a, d, c);
+      }
+    }
+    return { p, n, u, i };
+  }
+  getBounds() {
     const m = this.matrix;
 
     // The half-extents of a transformed sphere (ellipsoid) 
@@ -240,11 +292,32 @@ Sphere.getSchema = function(sphere) {
 
 class Cube extends Primitive {
   constructor(material, minX, minY, minZ, maxX, maxY, maxZ) {
-    super(material);
-    this.type = "Cube";
+    super(material,"Cube");
+    this.icon = "🧊";
     vec3.set(this.position, (minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
     vec3.set(this.scale, (maxX - minX) / 2, (maxY - minY) / 2, (maxZ - minZ) / 2);
     this.updateMatrix();
+  }
+  generateMesh() {
+    // Standard cube with 24 vertices to allow distinct normals/UVs per face
+    const p = [
+      -1,-1, 1,  1,-1, 1,  1, 1, 1, -1, 1, 1, // Front
+      -1,-1,-1, -1, 1,-1,  1, 1,-1,  1,-1,-1, // Back
+      -1, 1,-1, -1, 1, 1,  1, 1, 1,  1, 1,-1, // Top
+      -1,-1,-1,  1,-1,-1,  1,-1, 1, -1,-1, 1, // Bottom
+       1,-1,-1,  1, 1,-1,  1, 1, 1,  1,-1, 1, // Right
+      -1,-1,-1, -1,-1, 1, -1, 1, 1, -1, 1,-1  // Left
+    ];
+    const n = [
+       0,0,1, 0,0,1, 0,0,1, 0,0,1,    0,0,-1, 0,0,-1, 0,0,-1, 0,0,-1,
+       0,1,0, 0,1,0, 0,1,0, 0,1,0,    0,-1,0, 0,-1,0, 0,-1,0, 0,-1,0,
+       1,0,0, 1,0,0, 1,0,0, 1,0,0,   -1,0,0, -1,0,0, -1,0,0, -1,0,0
+    ];
+    const u = [];
+    for(let f=0; f<6; f++) u.push(0,0, 1,0, 1,1, 0,1);
+    const i = [];
+    for(let f=0; f<6; f++) { const o = f*4; i.push(o, o+1, o+2, o, o+2, o+3); }
+    return { p, n, u, i };
   }
 }
 Cube.getSchema = function(cube) {
@@ -258,8 +331,8 @@ Cube.getSchema = function(cube) {
 
 class Frustum extends Primitive {
   constructor(material, top_radius = 0.5) {
-    super(material);
-    this.type = "Frustum";
+    super(material,"Frustum");
+    this.icon = "🛢️";
     this.top_radius = top_radius; // In this context, it will act as a ratio
   }
 
@@ -296,15 +369,70 @@ class Frustum extends Primitive {
     this.updateMatrix();
     return this;
   }
+  
+  generateMesh(segs = 32) {
+    const p = [], n = [], u = [], i = [];
+    const bottom = 0;
+    const top = 1;
+    const radiusBottom = 1;
+    const radiusTop = this.top_radius;
 
-  // getWorldAABB() {
+    // --- 1. Side Walls ---
+    // We double the vertices at the seam (x=0 and x=segs) to prevent UV bleeding
+    for (let y = 0; y <= 1; y++) {
+      const r = (y === 0) ? radiusBottom : radiusTop;
+      const py = (y === 0) ? bottom : top;
+      for (let x = 0; x <= segs; x++) {
+        const uVal = x / segs;
+        const theta = uVal * Math.PI * 2;
+        const cos = Math.cos(theta);
+        const sin = Math.sin(theta);
+        
+        p.push(r * cos, py, r * sin);
+        n.push(cos, 0, sin); 
+        u.push(uVal, y);
+      }
+    }
+    for (let x = 0; x < segs; x++) {
+      const a = x, b = x + 1, c = x + (segs + 1), d = c + 1;
+      i.push(a, b, d, a, d, c);
+    }
+
+    // --- 2. Bottom Cap (y = bottom) ---
+    let offset = p.length / 3;
+    p.push(0, bottom, 0); n.push(0, -1, 0); u.push(0.5, 0.5); // Center
+    for (let x = 0; x <= segs; x++) {
+      const theta = (x / segs) * Math.PI * 2;
+      const cos = Math.cos(theta), sin = Math.sin(theta);
+      p.push(radiusBottom * cos, bottom, radiusBottom * sin);
+      n.push(0, -1, 0);
+      u.push(0.5 + cos * 0.5, 0.5 + sin * 0.5);
+      if (x < segs) i.push(offset, offset + x + 2, offset + x + 1);
+    }
+
+    // --- 3. Top Cap (y = top) ---
+    offset = p.length / 3;
+    p.push(0, top, 0); n.push(0, 1, 0); u.push(0.5, 0.5); // Center
+    for (let x = 0; x <= segs; x++) {
+      const theta = (x / segs) * Math.PI * 2;
+      const cos = Math.cos(theta), sin = Math.sin(theta);
+      p.push(radiusTop * cos, top, radiusTop * sin);
+      n.push(0, 1, 0);
+      u.push(0.5 + cos * 0.5, 0.5 + sin * 0.5);
+      if (x < segs) i.push(offset, offset + x + 1, offset + x + 2);
+    }
+
+    return { p, n, u, i };
+  }
+
+  // getBounds() {
   //   const worldMatrix = mat4.create();
   //   mat4.invert(worldMatrix, this.invMatrix);
   //   // Frustum is defined y=0 to y=1, and x/z depends on radii
   //   const maxR = this.top_radius;
   //   return transformAABB([-maxR, 0, -maxR], [maxR, 1, maxR], worldMatrix);
   // }
-  getWorldAABB() {
+  getBounds() {
     const m = this.matrix; 
 
     const getCircleAABB = (yLocal, radius) => {
@@ -347,8 +475,8 @@ Frustum.getSchema = function(frustum) {
 
 class Torus extends Primitive {
   constructor(material, outerRadius = 1.0, innerRadius = 0.3) {
-    super(material);
-    this.type = "Torus";
+    super(material,"Torus");
+    this.icon = "🍩";
     this.setRadii(outerRadius, innerRadius);
   }
 
@@ -362,14 +490,39 @@ class Torus extends Primitive {
     return this;
   }
 
-  // getWorldAABB() {
+  generateMesh(radSegs = 32, tubSegs = 16) {
+    const p = [], n = [], u = [], i = [];
+    const r = this.inner_radius; 
+    const R = 1.0; // Major radius normalized
+    for (let j = 0; j <= tubSegs; j++) {
+      for (let k = 0; k <= radSegs; k++) {
+        const uVal = k / radSegs, vVal = j / tubSegs;
+        const theta = uVal * Math.PI * 2, phi = vVal * Math.PI * 2;
+        const x = (R + r * Math.cos(phi)) * Math.cos(theta);
+        const y = r * Math.sin(phi);
+        const z = (R + r * Math.cos(phi)) * Math.sin(theta);
+        p.push(x, y, z);
+        n.push(Math.cos(phi)*Math.cos(theta), Math.sin(phi), Math.cos(phi)*Math.sin(theta));
+        u.push(uVal, vVal);
+      }
+    }
+    for (let j = 0; j < tubSegs; j++) {
+      for (let k = 0; k < radSegs; k++) {
+        const a = j * (radSegs + 1) + k, b = a + 1, c = a + (radSegs + 1), d = c + 1;
+        i.push(a, b, d, a, d, c);
+      }
+    }
+    return { p, n, u, i };
+  }
+
+  // getBounds() {
   //   const worldMatrix = mat4.create();
   //   mat4.invert(worldMatrix, this.invMatrix);
   //   // Torus lies in XZ plane. Local bounds:
   //   const r = 1 + this.inner_radius;
   //   return transformAABB([-r, -this.inner_radius, -r], [r, this.inner_radius, r], worldMatrix);
   // }
-  getWorldAABB() {
+  getBounds() {
     const m = this.matrix; // Local to World
     const R = 1.0;            // Major Radius (per your prompt)
     const r = this.inner_radius; // Minor Radius (thickness)
@@ -419,51 +572,154 @@ Torus.getSchema = function(torus) {
   ];
 }
 
-class Plane {
-  constructor(material, nx, ny, nz, d) {
+class Plane extends Primitive {
+  constructor(material, nx=0, ny=1, nz=0, d=0) {
+    super(material,"Plane")
     this.material = material;
-    this.normal = vec3.normalize(vec3.create(), vec3.fromValues(nx, ny, nz));
-    this.d = d;
-    this.type = "Plane";
+    this.orient(nx,ny,nz,d);
+    this.icon = "✈️"
+  }
+  getBounds() {
+    return {max:[0,0,0],min:[0,0,0]};
+  }
+  orient(nx, ny, nz, d) {
+    const targetNormal = vec3.normalize(vec3.create(), [nx, ny, nz]);
+    vec3.scale(this.position, targetNormal, d);
+    const localUp = vec3.fromValues(0, 1, 0);
+    quat.rotationTo(this.rotation, localUp, targetNormal);
+    this.updateMatrix();
+    return this;
+  }
+  getOrientation() {
+    const worldNormal = vec3.fromValues(0, 1, 0);
+    vec3.transformQuat(worldNormal, worldNormal, this.rotation);
+    const d = vec3.dot(this.position, worldNormal);
+    return { normal: worldNormal, d: d };
+  }
+  // generateMesh() {
+  //   const size = 1000;
+  //   const p = [ -size, 0, -size,  size, 0, -size,  size, 0, size, -size, 0, size ];
+  //   const n = [ 0, 1, 0,  0, 1, 0,  0, 1, 0,  0, 1, 0 ];
+  //   const u = [ 0, 0,  size/10, 0,  size/10, size/10, 0, size/10 ];
+  //   const i = [0, 1, 2, 0, 2, 3];
+  //   return { p, n, u, i };
+  // }
+  generateMesh() {
+    const p = [], n = [], u = [], i = [];
+    const res = 100;    // Central grid resolution
+    const size = 100;   // Central grid total size (units)
+    const far = 10000;  // "Infinite" distance
+    const step = size / res;
+    const half = size / 2;
+
+    // 1. GENERATE CENTRAL TILED GRID
+    for (let z = 0; z <= res; z++) {
+      for (let x = 0; x <= res; x++) {
+        const posX = x * step - half;
+        const posZ = z * step - half;
+        p.push(posX, 0, posZ);
+        n.push(0, 1, 0);
+        u.push(posX, posZ); // Tiled UVs (1 unit = 1 repeat)
+      }
+    }
+
+    // Generate indices for the central grid
+    for (let z = 0; z < res; z++) {
+      for (let x = 0; x < res; x++) {
+        const r1 = z * (res + 1);
+        const r2 = (z + 1) * (res + 1);
+        i.push(r1 + x, r1 + x + 1, r2 + x);
+        i.push(r1 + x + 1, r2 + x + 1, r2 + x);
+      }
+    }
+
+    // 2. GENERATE HORIZON SKIRT (The "Infinite" Edges)
+    const gridCount = p.length / 3;
+    
+    // Add 4 Far Vertices (Corners of the universe)
+    // All UVs set to 0.5, 0.5 as requested
+    const farCoords = [
+      [-far, 0, -far], [far, 0, -far], 
+      [far, 0, far], [-far, 0, far]
+    ];
+    
+    farCoords.forEach(coords => {
+      p.push(...coords);
+      n.push(0, 1, 0);
+      u.push(0.5, 0.5); 
+    });
+
+    const idxNW = gridCount, idxNE = gridCount + 1, idxSE = gridCount + 2, idxSW = gridCount + 3;
+
+    // Stitch North Edge (z = 0) to Far North points
+    for (let x = 0; x < res; x++) {
+      const v1 = x;
+      const v2 = x + 1;
+      i.push(v1, idxNW, v2);
+      i.push(v2, idxNW, idxNE);
+    }
+
+    // Stitch South Edge (z = res) to Far South points
+    const sStart = res * (res + 1);
+    for (let x = 0; x < res; x++) {
+      const v1 = sStart + x;
+      const v2 = sStart + x + 1;
+      i.push(v1, v2, idxSW);
+      i.push(v2, idxSE, idxSW);
+    }
+
+    // Stitch West Edge (x = 0)
+    for (let z = 0; z < res; z++) {
+      const v1 = z * (res + 1);
+      const v2 = (z + 1) * (res + 1);
+      i.push(v1, v2, idxNW);
+      i.push(v2, idxSW, idxNW);
+    }
+
+    // Stitch East Edge (x = res)
+    for (let z = 0; z < res; z++) {
+      const v1 = z * (res + 1) + res;
+      const v2 = (z + 1) * (res + 1) + res;
+      i.push(v1, idxNE, v2);
+      i.push(v2, idxNE, idxSE);
+    }
+
+    return { p, n, u, i };
   }
 }
 Plane.getSchema = function(plane) {
+  const orientation = plane ? plane.getOrientation() : { d: 0, normal: [0,0,0] };
   if (!plane) plane = {material:{_index:-1}};
   return [
-    { type:"vec3f", data: plane.normal },
-    { type:"f32", data: plane.d },
+    { type:"vec3f", data: orientation.normal },
+    { type:"f32", data: orientation.d },
     { type:"i32", data: plane.material._index },
   ];
 }
 
-class AABB {
-  constructor() {
-    this.min = [Infinity, Infinity, Infinity];
-    this.max = [-Infinity, -Infinity, -Infinity];
-  }
-  expand(p) {
-    this.min[0] = Math.min(this.min[0], p[0]); this.min[1] = Math.min(this.min[1], p[1]); this.min[2] = Math.min(this.min[2], p[2]);
-    this.max[0] = Math.max(this.max[0], p[0]); this.max[1] = Math.max(this.max[1], p[1]); this.max[2] = Math.max(this.max[2], p[2]);
-  }
-  expandAABB(aabb) {
-    if (aabb.min[0] === Infinity) return;
-    this.expand(aabb.min);
-    this.expand(aabb.max);
-  }
-  area() {
-    let e = [this.max[0]-this.min[0], this.max[1]-this.min[1], this.max[2]-this.min[2]];
-    if (e[0] < 0 || e[1] < 0 || e[2] < 0) return 0;
-    return 2 * (e[0]*e[1] + e[1]*e[2] + e[2]*e[0]);
-  }
-}
-
 class ModelData {
-  constructor(url, onload) {
+  constructor(name) {
+    this.id = 'model_' + Math.random().toString(36).substr(2, 9);
+    this.name = name || "New Model";
+
+    // Core geometry data stored in flat typed arrays
+    this.vertex_positions = new Float32Array(0);
+    this.vertex_normals = new Float32Array(0);
+    this.vertex_texcoords = new Float32Array(0);
+
+    // Indices for topology
+    this.index_positions = new Uint32Array(0);
+    this.index_normals = new Uint32Array(0);
+    this.index_texcoords = new Uint32Array(0);
+
     this.triangles = []; // Initial raw triangles
     this.nodes = [];     // Final flattened BVH nodes [{min, max, num_triangles, next}]
     this.flatTriangles = []; // Final sorted triangles [{v0, v1, v2, n0, n1, n2, u0, u1, u2}]
-    this.triangles = [];
 
+    this.glData = null;
+  }
+
+  loadOBJ(url,onload) {
     this.loaded = (async () => {
       try {
         const res = await fetch(url);
@@ -473,45 +729,90 @@ class ModelData {
       } catch (e) {
         console.error("Model load failed:", e);
       }
+      return this;
     })();
+    return this;
   }
 
   parseOBJ(txt) {
     const lines = txt.split('\n');
-    const v = [], vt = [], vn = [];
-    this.triangles = [];
+    const positions = [];
+    const uvs = [];
+    const normals = [];
+    const f_p = [], f_u = [], f_n = [];
+
     for (const line of lines) {
       const parts = line.trim().split(/\s+/);
-      if (parts[0] === 'v') v.push([parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])]);
-      else if (parts[0] === 'vt') vt.push([parseFloat(parts[1]), parseFloat(parts[2])]);
-      else if (parts[0] === 'vn') vn.push([parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])]);
-      else if (parts[0] === 'f') {
+      const type = parts[0];
+      if (type === 'v') positions.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]));
+      else if (type === 'vt') uvs.push(parseFloat(parts[1]), parseFloat(parts[2]));
+      else if (type === 'vn') normals.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]));
+      else if (type === 'f') {
         const face = parts.slice(1).map(p => {
-          const indices = p.split('/');
+          const idx = p.split('/');
           return {
-            v: parseInt(indices[0]) - 1,
-            vt: indices[1] ? parseInt(indices[1]) - 1 : -1,
-            vn: indices[2] ? parseInt(indices[2]) - 1 : -1
+            v: parseInt(idx[0]) - 1,
+            u: idx[1] ? parseInt(idx[1]) - 1 : -1,
+            n: idx[2] ? parseInt(idx[2]) - 1 : -1
           };
         });
+        // Simple triangulation for N-gons
         for (let i = 1; i < face.length - 1; i++) {
-          const tri = {
-            v0: [...v[face[0].v]], v1: [...v[face[i].v]], v2: [...v[face[i+1].v]],
-            u0: face[0].vt >= 0 ? [...vt[face[0].vt]] : [0,0],
-            u1: face[i].vt >= 0 ? [...vt[face[i].vt]] : [0,0],
-            u2: face[i+1].vt >= 0 ? [...vt[face[i+1].vt]] : [0,0],
-            n0: face[0].vn >= 0 ? [...vn[face[0].vn]] : [0,1,0],
-            n1: face[i].vn >= 0 ? [...vn[face[i].vn]] : [0,1,0],
-            n2: face[i+1].vn >= 0 ? [...vn[face[i+1].vn]] : [0,1,0],
-          };
-          tri.centroid = [(tri.v0[0]+tri.v1[0]+tri.v2[0])/3, (tri.v0[1]+tri.v1[1]+tri.v2[1])/3, (tri.v0[2]+tri.v1[2]+tri.v2[2])/3];
-          this.triangles.push(tri);
+          f_p.push(face[0].v, face[i].v, face[i+1].v);
+          f_u.push(face[0].u, face[i].u, face[i+1].u);
+          f_n.push(face[0].n, face[i].n, face[i+1].n);
         }
       }
+    }
+
+    this.vertex_positions = new Float32Array(positions);
+    this.vertex_normals = new Float32Array(normals);
+    this.vertex_texcoords = new Float32Array(uvs);
+    this.index_positions = new Int32Array(f_p);
+    this.index_normals = new Int32Array(f_n);
+    this.index_texcoords = new Int32Array(f_u);
+    return this;
+  }
+
+  generateTriangles() {
+    const triCount = this.index_positions.length / 3;
+    this.triangles = new Array(triCount);
+
+    for (let i = 0; i < triCount; i++) {
+      const i3 = i * 3;
+      
+      // Get indices for this triangle
+      const ip = [this.index_positions[i3], this.index_positions[i3+1], this.index_positions[i3+2]];
+      const inorm = [this.index_normals[i3], this.index_normals[i3+1], this.index_normals[i3+2]];
+      const iuv = [this.index_texcoords[i3], this.index_texcoords[i3+1], this.index_texcoords[i3+2]];
+
+      const tri = {
+        v0: [this.vertex_positions[ip[0]*3], this.vertex_positions[ip[0]*3+1], this.vertex_positions[ip[0]*3+2]],
+        v1: [this.vertex_positions[ip[1]*3], this.vertex_positions[ip[1]*3+1], this.vertex_positions[ip[1]*3+2]],
+        v2: [this.vertex_positions[ip[2]*3], this.vertex_positions[ip[2]*3+1], this.vertex_positions[ip[2]*3+2]],
+        
+        n0: [this.vertex_normals[inorm[0]*3], this.vertex_normals[inorm[0]*3+1], this.vertex_normals[inorm[0]*3+2]],
+        n1: [this.vertex_normals[inorm[1]*3], this.vertex_normals[inorm[1]*3+1], this.vertex_normals[inorm[1]*3+2]],
+        n2: [this.vertex_normals[inorm[2]*3], this.vertex_normals[inorm[2]*3+1], this.vertex_normals[inorm[2]*3+2]],
+        
+        u0: [this.vertex_texcoords[iuv[0]*2], this.vertex_texcoords[iuv[0]*2+1]],
+        u1: [this.vertex_texcoords[iuv[1]*2], this.vertex_texcoords[iuv[1]*2+1]],
+        u2: [this.vertex_texcoords[iuv[2]*2], this.vertex_texcoords[iuv[2]*2+1]]
+      };
+
+      tri.centroid = [
+        (tri.v0[0] + tri.v1[0] + tri.v2[0]) / 3,
+        (tri.v0[1] + tri.v1[1] + tri.v2[1]) / 3,
+        (tri.v0[2] + tri.v1[2] + tri.v2[2]) / 3
+      ];
+
+      this.triangles[i] = tri;
     }
   }
 
   generateBVH() {
+    this.glData = null;
+    this.generateTriangles();
     const triCentroids = this.triangles.map(t => t.centroid);
     const triIndices = this.triangles.map((_, i) => i);
 
@@ -604,152 +905,288 @@ class ModelData {
     flatten(bvhRoot,-1);
   }
 
-  bakeTransform(matrix) {
-    for (let t of this.triangles) {
-      vec3.transformMat4(t.v0, t.v0, matrix);
-      vec3.transformMat4(t.v1, t.v1, matrix);
-      vec3.transformMat4(t.v2, t.v2, matrix);
-      t.centroid = [ (t.v0[0]+t.v1[0]+t.v2[0])/3, (t.v0[1]+t.v1[1]+t.v2[1])/3, (t.v0[2]+t.v1[2]+t.v2[2])/3 ];
+  renormalize(bottomAlign = false) {
+    let min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < this.vertex_positions.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        min[k] = Math.min(min[k], this.vertex_positions[i + k]);
+        max[k] = Math.max(max[k], this.vertex_positions[i + k]);
+      }
     }
-  }
+    const center = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+    if (bottomAlign) center[1] = min[1];
+    const size = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]) || 1;
+    const scale = 2.0 / size;
 
-  renormalize(bottom) {
-    let aabb = new AABB();
-    for (let t of this.triangles) {
-      aabb.expand(t.v0); aabb.expand(t.v1); aabb.expand(t.v2);
-    }
-    let center = [ (aabb.min[0]+aabb.max[0])/2, (aabb.min[1]+aabb.max[1])/2, (aabb.min[2]+aabb.max[2])/2 ];
-    let size = Math.max(aabb.max[0]-aabb.min[0], aabb.max[1]-aabb.min[1], aabb.max[2]-aabb.min[2]);
-    let scale = 2.0 / size;
-    let m = mat4.create();
-    if (bottom) center[1] = 0;
+    const m = mat4.create();
     mat4.scale(m, m, [scale, scale, scale]);
     mat4.translate(m, m, [-center[0], -center[1], -center[2]]);
-    this.bakeTransform(m);
+    
+    return this.bakeTransform(m);
   }
 
-  calculateVertexNormals() {
-    for (let t of this.triangles) {
-      let e1 = vec3.sub([], t.v1, t.v0);
-      let e2 = vec3.sub([], t.v2, t.v0);
-      let n = vec3.cross([], e1, e2);
-      vec3.normalize(n, n);
-      t.n0 = [...n]; t.n1 = [...n]; t.n2 = [...n];
+  /**
+   * Generates spherical UV coordinates based on vertex positions.
+   */
+  calculateSphericalUVs() {
+    const vCount = this.vertex_positions.length / 3;
+    this.vertex_texcoords = new Float32Array(vCount * 2);
+    this.index_texcoords = new Uint32Array(this.index_positions);
+
+    for (let i = 0; i < vCount; i++) {
+      const x = this.vertex_positions[i*3];
+      const y = this.vertex_positions[i*3+1];
+      const z = this.vertex_positions[i*3+2];
+      const r = Math.sqrt(x*x + y*y + z*z) || 1.0;
+      
+      this.vertex_texcoords[i*2] = Math.atan2(z, x) / (2 * Math.PI) + 0.5;
+      this.vertex_texcoords[i*2+1] = Math.asin(y / r) / Math.PI + 0.5;
     }
   }
 
-  calculateSmoothNormals(weightByArea = true) {
-    // 1. Map to accumulate normals for each unique vertex position
-    // Key: "x,y,z" string, Value: [nx, ny, nz]
-    const vertexNormalMap = new Map();
+  calculateFaceNormals() {
+    const triCount = this.index_positions.length / 3;
+    const newNormals = new Float32Array(this.index_positions.length * 3);
+    
+    const v0 = vec3.create(), v1 = vec3.create(), v2 = vec3.create();
+    const edge1 = vec3.create(), edge2 = vec3.create(), normal = vec3.create();
 
-    // 2. First pass: Calculate face normals and accumulate
-    for (let tri of this.triangles) {
-      // Edge vectors
-      const e1 = [tri.v1[0] - tri.v0[0], tri.v1[1] - tri.v0[1], tri.v1[2] - tri.v0[2]];
-      const e2 = [tri.v2[0] - tri.v0[0], tri.v2[1] - tri.v0[1], tri.v2[2] - tri.v0[2]];
-      
-      // Cross product (Face Normal * 2 * Area)
-      const nx = e1[1] * e2[2] - e1[2] * e2[1];
-      const ny = e1[2] * e2[0] - e1[0] * e2[2];
-      const nz = e1[0] * e2[1] - e1[1] * e2[0];
-      
-      let faceNormal = [nx, ny, nz];
-      const crossProductMag = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    for (let i = 0; i < triCount; i++) {
+      const i3 = i * 3;
+      const p0 = this.index_positions[i3] * 3;
+      const p1 = this.index_positions[i3 + 1] * 3;
+      const p2 = this.index_positions[i3 + 2] * 3;
 
-      if (crossProductMag > 1e-10) {
-        if (weightByArea) {
-          // The magnitude of the cross product is already proportional to 2 * Area.
-          // Keeping the vector as-is automatically weights the sum by triangle size.
-          faceNormal = [nx, ny, nz]; 
-        } else {
-          // Normalizing here gives every triangle 1.0 "vote" regardless of size.
-          faceNormal = [nx / crossProductMag, ny / crossProductMag, nz / crossProductMag];
-        }
+      vec3.set(v0, this.vertex_positions[p0], this.vertex_positions[p0+1], this.vertex_positions[p0+2]);
+      vec3.set(v1, this.vertex_positions[p1], this.vertex_positions[p1+1], this.vertex_positions[p1+2]);
+      vec3.set(v2, this.vertex_positions[p2], this.vertex_positions[p2+1], this.vertex_positions[p2+2]);
 
-        // Accumulate for all 3 vertices
-        [tri.v0, tri.v1, tri.v2].forEach(v => {
-          const key = `${v[0].toFixed(6)},${v[1].toFixed(6)},${v[2].toFixed(6)}`;
-          if (!vertexNormalMap.has(key)) {
-            vertexNormalMap.set(key, [0, 0, 0]);
-          }
-          const n = vertexNormalMap.get(key);
-          n[0] += faceNormal[0];
-          n[1] += faceNormal[1];
-          n[2] += faceNormal[2];
-        });
+      vec3.sub(edge1, v1, v0);
+      vec3.sub(edge2, v2, v0);
+      vec3.cross(normal, edge1, edge2);
+      vec3.normalize(normal, normal);
+
+      // Assign the same normal to all 3 vertices of the face
+      for(let j = 0; j < 3; j++) {
+        newNormals[(i3 + j) * 3]     = normal[0];
+        newNormals[(i3 + j) * 3 + 1] = normal[1];
+        newNormals[(i3 + j) * 3 + 2] = normal[2];
       }
     }
 
-    // 3. Second pass: Normalize and assign
-    for (let tri of this.triangles) {
-      [tri.v0, tri.v1, tri.v2].forEach((v, i) => {
-        const key = `${v[0].toFixed(6)},${v[1].toFixed(6)},${v[2].toFixed(6)}`;
-        const n = vertexNormalMap.get(key);
-        
-        const len = Math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-        const finalN = len > 1e-10 ? [n[0] / len, n[1] / len, n[2] / len] : [0, 1, 0];
-
-        tri[`n${i}`] = finalN;
-      });
-    }
+    this.vertex_normals = newNormals;
+    // Update indices to be 1:1 with the new normal buffer
+    this.index_normals = new Uint32Array(this.index_positions.length);
+    for(let i = 0; i < this.index_normals.length; i++) this.index_normals[i] = i;
+    
+    return this;
   }
 
-  calculateSphericalUVs() {
-    for (let t of this.triangles) {
-      t.uv0 = [ Math.atan2(t.v0[2], t.v0[0])/(2*Math.PI)+0.5, Math.asin(t.v0[1])/Math.PI+0.5 ];
-      t.uv1 = [ Math.atan2(t.v1[2], t.v1[0])/(2*Math.PI)+0.5, Math.asin(t.v1[1])/Math.PI+0.5 ];
-      t.uv2 = [ Math.atan2(t.v2[2], t.v2[0])/(2*Math.PI)+0.5, Math.asin(t.v2[1])/Math.PI+0.5 ];
+  /**
+   * Calculates smooth normals by averaging face normals at each vertex.
+   */
+  calculateSmoothNormals() {
+    const vCount = this.vertex_positions.length / 3;
+    const triCount = this.index_positions.length / 3;
+    const smoothNormals = new Float32Array(vCount * 3);
+
+    const v0 = vec3.create(), v1 = vec3.create(), v2 = vec3.create();
+    const edge1 = vec3.create(), edge2 = vec3.create(), faceNormal = vec3.create();
+
+    // Accumulate face normals into vertices
+    for (let i = 0; i < triCount; i++) {
+      const i3 = i * 3;
+      const idxs = [this.index_positions[i3], this.index_positions[i3+1], this.index_positions[i3+2]];
+
+      vec3.set(v0, this.vertex_positions[idxs[0]*3], this.vertex_positions[idxs[0]*3+1], this.vertex_positions[idxs[0]*3+2]);
+      vec3.set(v1, this.vertex_positions[idxs[1]*3], this.vertex_positions[idxs[1]*3+1], this.vertex_positions[idxs[1]*3+2]);
+      vec3.set(v2, this.vertex_positions[idxs[2]*3], this.vertex_positions[idxs[2]*3+1], this.vertex_positions[idxs[2]*3+2]);
+
+      vec3.sub(edge1, v1, v0);
+      vec3.sub(edge2, v2, v0);
+      vec3.cross(faceNormal, edge1, edge2);
+      // Note: We don't normalize here so that larger triangles contribute more (area-weighting)
+
+      for (let j = 0; j < 3; j++) {
+        smoothNormals[idxs[j]*3]     += faceNormal[0];
+        smoothNormals[idxs[j]*3 + 1] += faceNormal[1];
+        smoothNormals[idxs[j]*3 + 2] += faceNormal[2];
+      }
     }
+
+    // Final pass: Normalize all accumulated vectors
+    const n = vec3.create();
+    for (let i = 0; i < vCount; i++) {
+      vec3.set(n, smoothNormals[i*3], smoothNormals[i*3+1], smoothNormals[i*3+2]);
+      if (vec3.length(n) > 0) {
+        vec3.normalize(n, n);
+        smoothNormals[i*3]   = n[0];
+        smoothNormals[i*3+1] = n[1];
+        smoothNormals[i*3+2] = n[2];
+      }
+    }
+
+    this.vertex_normals = smoothNormals;
+    this.index_normals = new Uint32Array(this.index_positions);
+    return this;
+  }
+
+  /**
+   * Bakes a mat4 transformation into the vertex positions and normals.
+   */
+  
+  bakeTransform(matrix) {
+    const vCount = this.vertex_positions.length / 3;
+    const nCount = this.vertex_normals.length / 3;
+
+    // 1. Transform Positions (w = 1)
+    const posVec = vec4.create();
+    for (let i = 0; i < vCount; i++) {
+      const i3 = i * 3;
+      vec4.set(posVec, 
+        this.vertex_positions[i3], 
+        this.vertex_positions[i3 + 1], 
+        this.vertex_positions[i3 + 2], 
+        1.0
+      );
+      vec4.transformMat4(posVec, posVec, matrix);
+      
+      this.vertex_positions[i3]     = posVec[0];
+      this.vertex_positions[i3 + 1] = posVec[1];
+      this.vertex_positions[i3 + 2] = posVec[2];
+    }
+
+    // 2. Transform Normals (w = 0, using Inverse Transpose)
+    if (nCount > 0) {
+      const normalMatrix = mat4.create();
+      mat4.invert(normalMatrix, matrix);
+      mat4.transpose(normalMatrix, normalMatrix);
+
+      const normVec = vec4.create();
+      for (let i = 0; i < nCount; i++) {
+        const i3 = i * 3;
+        vec4.set(normVec, 
+          this.vertex_normals[i3], 
+          this.vertex_normals[i3 + 1], 
+          this.vertex_normals[i3 + 2], 
+          0.0
+        );
+        vec4.transformMat4(normVec, normVec, normalMatrix);
+        
+        // After transformation, normals must be re-normalized 
+        // to account for scaling in the matrix
+        let len = Math.sqrt(normVec[0]**2 + normVec[1]**2 + normVec[2]**2);
+        if (len > 0) {
+          this.vertex_normals[i3]     = normVec[0] / len;
+          this.vertex_normals[i3 + 1] = normVec[1] / len;
+          this.vertex_normals[i3 + 2] = normVec[2] / len;
+        }
+      }
+    }
+
+    // Mark for BVH rebuild if necessary
+    //this.bvhreset = true; 
+    return this;
+  }
+
+  generateMesh() {
+    if (this.glData) return this.glData;
+    const triCount = this.index_positions.length / 3;
+    const vertexCount = triCount * 3;
+
+    const p = new Float32Array(vertexCount * 3);
+    const n = new Float32Array(vertexCount * 3);
+    const u = new Float32Array(vertexCount * 2);
+    const i = new Uint32Array(vertexCount);
+
+    for (let idx = 0; idx < vertexCount; idx++) {
+      const pi = this.index_positions[idx];
+      const ni = this.index_normals[idx];
+      const ui = this.index_texcoords[idx];
+
+      // Copy Positions
+      p[idx * 3]     = this.vertex_positions[pi * 3];
+      p[idx * 3 + 1] = this.vertex_positions[pi * 3 + 1];
+      p[idx * 3 + 2] = this.vertex_positions[pi * 3 + 2];
+
+      // Copy Normals
+      if (this.vertex_normals.length > ni * 3) {
+        n[idx * 3]     = this.vertex_normals[ni * 3];
+        n[idx * 3 + 1] = this.vertex_normals[ni * 3 + 1];
+        n[idx * 3 + 2] = this.vertex_normals[ni * 3 + 2];
+      }
+
+      // Copy UVs
+      if (this.vertex_texcoords.length > ui * 2) {
+        u[idx * 2]     = this.vertex_texcoords[ui * 2];
+        u[idx * 2 + 1] = this.vertex_texcoords[ui * 2 + 1];
+      }
+
+      i[idx] = idx;
+    }
+
+    this.glData = { p, n, u, i };
+    return this.glData;
   }
 }
 
 class Model extends Primitive {
   constructor(material, model, inSceneBVH) {
-    super(material);
+    super(material,"Model");
+    this.icon = "📐";
     this.model = model;
     this.inSceneBVH = inSceneBVH;
-    this.type = "Model";
   }
-  // getWorldAABB() {
+  generateMesh() {
+    return this.model.generateMesh();
+  }
+  // getBounds() {
   //   // Meshes already have a local BVH. We take the root node's AABB.
   //   const root = this.model.nodes[0];
   //   const worldMatrix = mat4.create();
   //   mat4.invert(worldMatrix, this.invMatrix);
   //   return transformAABB(root.min, root.max, worldMatrix);
   // }
-  getWorldAABB() {
+  getBounds() {
     const worldMatrix = mat4.create();
     mat4.invert(worldMatrix, this.invMatrix);
-    
-    const triangles = this.model.triangles;
+
+    const positions = this.model.vertex_positions;
+    const vertexCount = positions.length / 3;
     const threshold = 5000;
 
-    if (triangles.length > 0 && triangles.length < threshold) {
+    if (vertexCount > 0 && vertexCount < threshold) {
       // --- PRECISE METHOD: Transform every unique vertex ---
-      let min = vec3.fromValues(Infinity, Infinity, Infinity);
-      let max = vec3.fromValues(-Infinity, -Infinity, -Infinity);
-      
+      const min = vec3.fromValues(Infinity, Infinity, Infinity);
+      const max = vec3.fromValues(-Infinity, -Infinity, -Infinity);
       const tempV = vec3.create();
 
-      for (let i = 0; i < triangles.length; i++) {
-        const tri = triangles[i];
-        // Check all 3 vertices of the triangle
-        const verts = [tri.v0, tri.v1, tri.v2];
+      for (let i = 0; i < vertexCount; i++) {
+        const i3 = i * 3;
+        // Load local vertex position
+        vec3.set(tempV, positions[i3], positions[i3 + 1], positions[i3 + 2]);
         
-        for (let v of verts) {
-          vec3.set(tempV, v[0], v[1], v[2]);
-          vec3.transformMat4(tempV, tempV, worldMatrix);
-          
-          vec3.min(min, min, tempV);
-          vec3.max(max, max, tempV);
-        }
+        // Transform to world space
+        vec3.transformMat4(tempV, tempV, worldMatrix);
+        
+        // Expand AABB
+        vec3.min(min, min, tempV);
+        vec3.max(max, max, tempV);
       }
       return { min, max };
     } else {
-      // --- FAST METHOD: 8 Corners of the local BVH root ---
+      // --- FAST METHOD: Transform 8 corners of the local BVH root AABB ---
       const root = this.model.nodes[0];
-      // Reuse your transformAABB helper from earlier
+      if (!root) {
+        // Fallback if model is empty
+        return { 
+          min: vec3.fromValues(-1, -1, -1), 
+          max: vec3.fromValues(1, 1, 1) 
+        };
+      }
+      
+      // Helper function assumed to be available in your environment
+      // It takes local min/max and transforms the 8 corners by the matrix
       return transformAABB(root.min, root.max, worldMatrix);
     }
   }
@@ -778,7 +1215,7 @@ class SceneBVHBuilder {
     // Create an array of object references with their calculated world bounds
     const items = this.objects.map((obj, index) => ({
       index: index, // This is the index in the globalObjectBuffer
-      aabb: obj.getWorldAABB()
+      aabb: obj.getBounds()
     }));
 
     this.recursiveBuild(items, 0);
@@ -908,15 +1345,15 @@ class Scene {
 class Camera {
   constructor(canvas) {
     this.position = vec3.fromValues(0, 1.5, 4.5);
-    this.lookingat = vec3.fromValues(0, 0.5, 0);
-    this.fov = 45; 
+    this.target = vec3.fromValues(0, 0.5, 0);
+    this.fov = 45;
     this.aspect = canvas.width / canvas.height;
     this.ray00 = vec3.create(); this.ray10 = vec3.create();
     this.ray01 = vec3.create(); this.ray11 = vec3.create();
     this.updateRays();
   }
   updateRays() {
-    const f = vec3.normalize(vec3.create(), vec3.sub(vec3.create(), this.lookingat, this.position));
+    const f = vec3.normalize(vec3.create(), vec3.sub(vec3.create(), this.target, this.position));
     const r = vec3.normalize(vec3.create(), vec3.cross(vec3.create(), f, [0, 1, 0]));
     const u = vec3.cross(vec3.create(), r, f);
     const h = Math.tan((this.fov * Math.PI / 180) / 2); 
@@ -929,7 +1366,7 @@ class Camera {
     vec3.add(this.ray11, f, hr); vec3.add(this.ray11, this.ray11, hu);
   }
   lookAt(x,y,z) {
-    this.lookingat = vec3.fromValues(x,y,z);
+    this.target = vec3.fromValues(x,y,z);
     this.updateRays();
   }
   setPosition(x,y,z) {
@@ -971,7 +1408,8 @@ class Renderer {
     context.configure({ 
       device: this.device, 
       format: 'rgba8unorm', 
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST 
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
+      alphaMode: 'premultiplied', 
     });
   }
 
@@ -1088,6 +1526,8 @@ class Renderer {
       minFilter: 'linear',
     });
 
+    console.log("Created Textures");
+
     // --- 1. EXTRACT & PACK MATERIALS ---
     const mats = scene.getMaterials();
     var hasHeightMaps = false;
@@ -1096,6 +1536,8 @@ class Renderer {
       if (m.heightTex) hasHeightMaps = true;
     });
     const { data: matData, size: matSize } = this.packDataFromSchema(mats,Material.getSchema);
+
+    console.log("Created Materials");
 
     // --- 1. PRE-CALCULATE TOTALS ---
     const modelObjects = scene.objects.filter(o => o.type === "Model");
@@ -1148,6 +1590,7 @@ class Renderer {
       });
     });
 
+    console.log("Loaded Model Data");
 
     const hasSpheres = scene.objects.some(o => o.type === "Sphere");
     const hasCubes = scene.objects.some(o => o.type === "Cube");
@@ -1157,7 +1600,6 @@ class Renderer {
     const models = modelObjects.filter(v=>v.inSceneBVH);
     const hasMeshes = models.length > 0;
     const bvh = new SceneBVHBuilder(objects.concat(models));
-    console.log(bvh);
     const { data: objectData, size: objectSize } = this.packDataFromSchema(bvh.objects,(obj)=>{
       if (!obj) obj = new Sphere({_index:-1},0,0,0,1);
       return obj.constructor.getSchema(obj);
@@ -1168,6 +1610,8 @@ class Renderer {
     const hasPlanes = planes.length > 0;
     const { data: planeData, size: planeSize } = this.packDataFromSchema(planes,Plane.getSchema);
     
+    console.log("Loaded Primitives");
+
     const makeBuf = (data, minSize = 16) => {
       const size = Math.max(minSize, data.byteLength);
       const b = this.device.createBuffer({ 
@@ -1195,9 +1639,14 @@ class Renderer {
     const uBuf = this.uBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const aBuf = device.createBuffer({ size: canvas.width * canvas.height * 16, usage: GPUBufferUsage.STORAGE });
 
-    const wgslCode = await loadText('shader.wgsl');
-    const shaderModule = device.createShaderModule({ code: wgslCode });
+    console.log("Created Buffers");
 
+    const wgslCode = await loadText('shader.wgsl');
+
+    console.log("Code Loaded");
+
+    const shaderModule = device.createShaderModule({ code: wgslCode });
+    
     const info = await shaderModule.getCompilationInfo();
     if (info.messages.length > 0) {
       console.error("WGSL Compilation Failed:");
@@ -1207,6 +1656,8 @@ class Renderer {
         console.warn(`Line ${line}:${col} - ${m.message}`);
       }
     }
+
+    console.log("Code Compiled");
 
     const pipe = this.pipe = device.createComputePipeline({ 
       layout: 'auto', 
@@ -1227,6 +1678,8 @@ class Renderer {
         }
       } 
     });
+
+    console.log("Pipeline Created");
     
     const tex = this.tex = device.createTexture({ 
       size: [canvas.width, canvas.height], 
@@ -1256,7 +1709,10 @@ class Renderer {
       ]
     });
 
+    console.log("Bindings Created");
+
     this.frame = 0;
+    console.log("Scene loaded!");
   }
   
   render() {
@@ -1285,5 +1741,58 @@ class Renderer {
     
     this.frame++;
   }
+
+  clear() {
+    this.frame = 0;
+    const { canvas, context, device} = this;
+    const canvasTexture = context.getCurrentTexture();
+    const renderPassDescriptor = {
+      colorAttachments: [{
+        view: canvasTexture.createView(),
+        clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }, // The clear color (dark blue in this case)
+        loadOp: 'clear',
+        storeOp: 'store',
+      }],
+    };
+    const encoder = device.createCommandEncoder({ label: 'clear encoder' });
+    const pass = encoder.beginRenderPass(renderPassDescriptor);
+    pass.end();
+
+    device.queue.submit([encoder.finish()]);
+    console.log("Cleared!");
+  }
 }
 
+
+
+const MathUtils = {
+  getRay(x, y, canvas, proj, view) {
+    const r = canvas.getBoundingClientRect();
+    const nx = ((x - r.left) / canvas.width) * 2 - 1;
+    const ny = -((y - r.top) / canvas.height) * 2 + 1;
+    const inv = mat4.create(); mat4.multiply(inv, proj, view); mat4.invert(inv, inv);
+    const near = vec4.fromValues(nx, ny, -1, 1); vec4.transformMat4(near, near, inv); vec3.scale(near, near, 1/near[3]);
+    const far = vec4.fromValues(nx, ny, 1, 1); vec4.transformMat4(far, far, inv); vec3.scale(far, far, 1/far[3]);
+    const dir = vec3.create(); vec3.subtract(dir, far, near); vec3.normalize(dir, dir);
+    return { origin: vec3.fromValues(near[0], near[1], near[2]), dir };
+  },
+  rayAABB(ray, min, max) {
+    let tmin = (min[0] - ray.origin[0]) / ray.dir[0], tmax = (max[0] - ray.origin[0]) / ray.dir[0];
+    if (tmin > tmax) [tmin, tmax] = [tmax, tmin];
+    let tymin = (min[1] - ray.origin[1]) / ray.dir[1], tymax = (max[1] - ray.origin[1]) / ray.dir[1];
+    if (tymin > tymax) [tymin, tymax] = [tymax, tymin];
+    if ((tmin > tymax) || (tymin > tmax)) return null;
+    if (tymin > tmin) tmin = tymin; if (tymax < tmax) tmax = tymax;
+    let tzmin = (min[2] - ray.origin[2]) / ray.dir[2], tzmax = (max[2] - ray.origin[2]) / ray.dir[2];
+    if (tzmin > tzmax) [tzmin, tzmax] = [tzmax, tzmin];
+    if ((tmin > tzmax) || (tzmin > tmax)) return null;
+    if (tzmin > tmin) tmin = tzmin; if (tzmax < tmax) tmax = tzmax;
+    return tmin > 0 ? tmin : null;
+  },
+  rayPlane(ray, pPos, pNorm) {
+    const denom = vec3.dot(pNorm, ray.dir);
+    if (Math.abs(denom) < 1e-6) return null;
+    const t = vec3.dot(vec3.subtract(vec3.create(), pPos, ray.origin), pNorm) / denom;
+    return t >= 0 ? t : null;
+  }
+};
