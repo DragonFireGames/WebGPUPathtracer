@@ -20,12 +20,14 @@ class Texture {
 }
 
 class HDRTexture {
-  constructor(url,name) {
+  constructor(url, name, exposure = 1) {
     this.id = 'hdrtexture_' + Math.random().toString(36).substr(2, 9);
     this.url = url;
     this.name = name || "New HDR Texture";
     this.width = 1;
     this.height = 1;
+    this.exposure = exposure;
+    this.thumbnailURL = {};
     this.data = new Float16Array([0.02,0.03,0.05,1.0]); // Float16Array
     if (typeof url == 'string') this.loaded = this._load(url);
     else this.data = new Float16Array(url);
@@ -46,9 +48,9 @@ class HDRTexture {
       // Convert RGB (3 floats) to RGBA (4 floats) for WebGPU compatibility
       this.data = new Float16Array(this.width * this.height * 4);
       for (let i = 0; i < this.width * this.height; i++) {
-        this.data[i * 4 + 0] = hdr.data[i * 4 + 0];
-        this.data[i * 4 + 1] = hdr.data[i * 4 + 1];
-        this.data[i * 4 + 2] = hdr.data[i * 4 + 2];
+        this.data[i * 4 + 0] = hdr.data[i * 4 + 0] * this.exposure;
+        this.data[i * 4 + 1] = hdr.data[i * 4 + 1] * this.exposure;
+        this.data[i * 4 + 2] = hdr.data[i * 4 + 2] * this.exposure;
         this.data[i * 4 + 3] = 1.0; // Alpha channel
       }
       return this;
@@ -59,6 +61,52 @@ class HDRTexture {
       this.data = new Float16Array([0.01, 0, 0, 1]);
       return this;
     }
+  }
+  
+  generateThumbnail(size = 256) {
+    if (this.thumbnailURL[size]) return this.thumbnailURL[size];
+    if (!this.data || !this.width || !this.height) return "";
+
+    // 1. Calculate downsampled dimensions
+    const scale = Math.min(size / this.width, size / this.height, 1.0);
+    const thumbW = Math.floor(this.width * scale);
+    const thumbH = Math.floor(this.height * scale);
+
+    const rgba = new Uint8ClampedArray(thumbW * thumbH * 4);
+
+    // 2. Sample data with Tone Mapping
+    for (let y = 0; y < thumbH; y++) {
+      for (let x = 0; x < thumbW; x++) {
+        // Map thumbnail pixel back to source data pixel
+        const srcX = Math.floor(x / scale);
+        const srcY = Math.floor(y / scale);
+        const srcIdx = (srcY * this.width + srcX) * 4;
+        const dstIdx = (y * thumbW + x) * 4;
+
+        for (let c = 0; c < 3; c++) {
+          let val = this.data[srcIdx + c] * this.exposure;
+          // Reinhard Tone Mapping
+          val = val / (1.0 + val);
+          // Gamma Correction
+          val = Math.pow(val, 1.0 / 2.2);
+          rgba[dstIdx + c] = Math.max(0, Math.min(255, val * 255));
+        }
+        rgba[dstIdx + 3] = 255;
+      }
+    }
+
+    // 3. Create canvas and return small DataURL
+    const canvas = document.createElement('canvas');
+    canvas.width = thumbW;
+    canvas.height = thumbH;
+    const ctx = canvas.getContext('2d');
+    
+    const imgData = new ImageData(rgba, thumbW, thumbH);
+    ctx.putImageData(imgData, 0, 0);
+
+    const url = canvas.toDataURL("image/png");
+    this.thumbnailURL[size] = url;
+    return url;
   }
 }
 
@@ -134,9 +182,9 @@ function transformAABB(localMin, localMax, worldMatrix) {
 }
 
 class Primitive {
-  constructor(material,type) {
+  constructor(name,material,type) {
     this.id = 'obj_' + Math.random().toString(36).substr(2, 9);
-    this.name = "New " + type;
+    this.name = name || ("New " + type);
     this.type = type;
     this.icon = "📦";
 
@@ -235,8 +283,8 @@ class Primitive {
 }
 
 class Sphere extends Primitive {
-  constructor(material, x, y, z, radius) {
-    super(material,"Sphere");
+  constructor(name,material, x=0, y=0, z=0, radius=1) {
+    super(name,material,"Sphere");
     this.icon = "⚽";
     vec3.set(this.position, x, y, z);
     vec3.set(this.scale, radius, radius, radius);
@@ -291,8 +339,8 @@ Sphere.getSchema = function(sphere) {
 }
 
 class Cube extends Primitive {
-  constructor(material, minX, minY, minZ, maxX, maxY, maxZ) {
-    super(material,"Cube");
+  constructor(name,material, minX=-1, minY=-1, minZ=-1, maxX=1, maxY=1, maxZ=1) {
+    super(name,material,"Cube");
     this.icon = "🧊";
     vec3.set(this.position, (minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
     vec3.set(this.scale, (maxX - minX) / 2, (maxY - minY) / 2, (maxZ - minZ) / 2);
@@ -330,8 +378,8 @@ Cube.getSchema = function(cube) {
 }
 
 class Frustum extends Primitive {
-  constructor(material, top_radius = 0.5) {
-    super(material,"Frustum");
+  constructor(name, material, top_radius = 0.5) {
+    super(name, material,"Frustum");
     this.icon = "🛢️";
     this.top_radius = top_radius; // In this context, it will act as a ratio
   }
@@ -474,8 +522,8 @@ Frustum.getSchema = function(frustum) {
 }
 
 class Torus extends Primitive {
-  constructor(material, outerRadius = 1.0, innerRadius = 0.3) {
-    super(material,"Torus");
+  constructor(name, material, outerRadius = 1.0, innerRadius = 0.3) {
+    super(name,material,"Torus");
     this.icon = "🍩";
     this.setRadii(outerRadius, innerRadius);
   }
@@ -573,8 +621,8 @@ Torus.getSchema = function(torus) {
 }
 
 class Plane extends Primitive {
-  constructor(material, nx=0, ny=1, nz=0, d=0) {
-    super(material,"Plane")
+  constructor(name,material, nx=0, ny=1, nz=0, d=0) {
+    super(name,material,"Plane")
     this.material = material;
     this.orient(nx,ny,nz,d);
     this.icon = "✈️"
@@ -1131,8 +1179,8 @@ class ModelData {
 }
 
 class Model extends Primitive {
-  constructor(material, model, inSceneBVH) {
-    super(material,"Model");
+  constructor(name, material, model, inSceneBVH) {
+    super(name,material,"Model");
     this.icon = "📐";
     this.model = model;
     this.inSceneBVH = inSceneBVH;
@@ -1714,12 +1762,11 @@ class Renderer {
     this.frame = 0;
     console.log("Scene loaded!");
   }
-  
-  render() {
-    if (!this.scene) return;
-    const { canvas, context, device, bG, pipe, tex, uBuf } = this;
+
+  updateUniforms() {
+    const { canvas, device, uBuf } = this;
+
     const cam = this.scene.camera;
-    
     const uData = new Float32Array(24);
     new Uint32Array(uData.buffer).set([this.frame, canvas.width, canvas.height, 0]);
     uData.set([...cam.position, 0], 4); 
@@ -1728,6 +1775,12 @@ class Renderer {
     uData.set([...cam.ray01, 0], 16); 
     uData.set([...cam.ray11, 0], 20);
     device.queue.writeBuffer(uBuf, 0, uData);
+  }
+  
+  render() {
+    if (!this.scene) return;
+    const { canvas, context, device, bG, pipe, tex } = this;
+    this.updateUniforms();
     
     const enc = device.createCommandEncoder();
     const pass = enc.beginComputePass();
@@ -1736,7 +1789,12 @@ class Renderer {
     pass.dispatchWorkgroups(Math.ceil(canvas.width / 16), Math.ceil(canvas.height / 16));
     pass.end();
     
-    enc.copyTextureToTexture({ texture: tex }, { texture: context.getCurrentTexture() }, [canvas.width, canvas.height]);
+    // if (this.frame < 10 
+    //   || (this.frame < 100 && this.frame % 5 == 0)
+    //   || (this.frame < 1000 && this.frame % 25 == 0)
+    //   || (this.frame % 125 == 0)) 
+      enc.copyTextureToTexture({ texture: tex }, { texture: context.getCurrentTexture() }, [canvas.width, canvas.height]);
+
     device.queue.submit([enc.finish()]);
     
     this.frame++;

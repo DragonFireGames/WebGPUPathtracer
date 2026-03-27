@@ -15,12 +15,43 @@ class CameraController {
     this.position[2] = this.target[2] + this.orbit.radius * Math.sin(this.orbit.phi) * Math.sin(this.orbit.theta);
     mat4.lookAt(this.view, this.position, this.target, [0, 1, 0]);
   }
+  updateOrbit(position, target) {
+    const dx = position[0] - target[0];
+    const dy = position[1] - target[1];
+    const dz = position[2] - target[2];
+    const radius = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (radius < 0.0001) return { phi: 0, theta: 0, radius: 0 };
+    const phi = Math.acos(Math.max(-1, Math.min(1, dy / radius)));
+    const theta = Math.atan2(dz, dx);
+    this.orbit = { phi, theta, radius };
+    this.position = position;
+    this.target = target;
+  }
 }
 
 const Cam = new CameraController();
 
+function createCheckerboardDataURL(size = 256, squares = 8, color1 = '#ffffff', color2 = '#000000') {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  
+  const squareSize = size / squares;
+  
+  for (let y = 0; y < squares; y++) {
+    for (let x = 0; x < squares; x++) {
+      ctx.fillStyle = (x + y) % 2 === 0 ? color1 : color2;
+      ctx.fillRect(x * squareSize, y * squareSize, squareSize, squareSize);
+    }
+  }
+  
+  return canvas.toDataURL();
+}
+
 const defaultMaterial = new Material("Default Material",0,[0.8,0.8,0.8],0.5,[0,0,0,0]);
 defaultMaterial.name = "Default Material";
+defaultMaterial.albedoTex = new Texture(createCheckerboardDataURL(64,2,"#ff00ff","#000"), "Checkerboard");
 var renderCanvas = document.createElement('canvas');
 const State = { tool: 't', scene: new Scene(renderCanvas), nodes: [], assets: [], selected: null, selectedAsset: null, idCounter: 1 };
 State.backgroundColor = [0.8,0.85,0.9];
@@ -39,6 +70,28 @@ const GeoGen = {
     const i = [0,1,2,0,2,3, 4,5,6,4,6,7, 8,9,10,8,10,11, 12,13,14,12,14,15, 16,17,18,16,18,19, 20,21,22,20,22,23];
     return { p, n, i };
   },
+  sphere(segs = 32) {
+    const p = [], n = [], u = [], i = [];
+    for (let y = 0; y <= segs; y++) {
+      const v = y / segs, phi = v * Math.PI;
+      for (let x = 0; x <= segs; x++) {
+        const uVal = x / segs, theta = uVal * Math.PI * 2;
+        const nx = Math.sin(phi) * Math.cos(theta);
+        const ny = Math.cos(phi);
+        const nz = Math.sin(phi) * Math.sin(theta);
+        p.push(nx, ny, nz); // Local unit sphere, scale handles the rest
+        n.push(nx, ny, nz);
+        u.push(uVal, v);
+      }
+    }
+    for (let y = 0; y < segs; y++) {
+      for (let x = 0; x < segs; x++) {
+        const a = y * (segs + 1) + x, b = a + 1, c = a + (segs + 1), d = c + 1;
+        i.push(a, b, d, a, d, c);
+      }
+    }
+    return { p, n, u, i };
+  }
 };
 
 // Base Node Class
@@ -202,11 +255,11 @@ class InteractionManager {
 }
 
 const Interact = new InteractionManager();
-const canvas = document.getElementById('glcanvas');
-const gl = canvas.getContext('webgl2', { antialias: true });
+const gl_canvas = document.getElementById('glcanvas');
+window.gl = gl_canvas.getContext('webgl2', { antialias: true });
 
 // Prevent context menu to allow smooth RMB panning
-canvas.addEventListener('contextmenu', e => e.preventDefault());
+gl_canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 const prog = gl.createProgram();
 const vs = `#version 300 es
@@ -292,6 +345,39 @@ const locs = {
   normalTex: gl.getUniformLocation(prog, "u_normalTex")
 };
 
+function setMaterialUniforms(mat) {
+  function uniformTexture(texloc,hastexloc,tex,index) {
+    let hasTexture = false;
+    if (tex) {
+      if (!tex.glTexture && tex.image.complete) {
+        window.uploadTextureToGPU(tex);
+      }
+      if (tex.glTexture) {
+        gl.activeTexture(gl["TEXTURE"+index]);
+        gl.bindTexture(gl.TEXTURE_2D, tex.glTexture);
+        gl.uniform1i(texloc, index);
+        hasTexture = true;
+      }
+    }
+    gl.uniform1i(hastexloc, hasTexture ? 1 : 0);
+  }
+
+  // Albedo Texture
+  if (mat) uniformTexture(locs.albedoTex,locs.hasAlbedo,mat.albedoTex,0)
+  else gl.uniform1i(locs.hasAlbedo, 0);
+
+  if (mat) uniformTexture(locs.normalTex,locs.hasNormal,mat.normalTex,1)
+  else gl.uniform1i(locs.hasNormal, 0);
+
+  let color = [0.8,0.8,0.8,1.0];
+  if (mat) color = [...mat.color, 1];
+  gl.uniform4fv(locs.color, color);
+
+  let emittance = [0,0,0];
+  if (mat) emittance = mat.emittance.map(v=>v*mat.emissionIntensity);
+  gl.uniform3fv(locs.emittance, emittance);
+}
+
 // Modified slightly to return buffers so we can delete them later
 window.createVAOWithBuffers = (p, n, i, u) => {
   const vao = gl.createVertexArray(); 
@@ -367,8 +453,8 @@ const gridGeo = (() => {
 })();
 
 function draw() {
-  const w = canvas.parentElement.clientWidth, h = canvas.parentElement.clientHeight;
-  if(canvas.width!==w || canvas.height!==h) { canvas.width=w; canvas.height=h; }
+  const w = gl_canvas.parentElement.clientWidth, h = gl_canvas.parentElement.clientHeight;
+  if(gl_canvas.width!==w || gl_canvas.height!==h) { gl_canvas.width=w; gl_canvas.height=h; }
   gl.viewport(0,0,w,h); gl.clearColor(0.09, 0.09, 0.09, 1); gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
   gl.enable(gl.DEPTH_TEST); gl.useProgram(prog);
   const vp = mat4.mul(mat4.create(), Cam.proj, Cam.view);
@@ -387,36 +473,7 @@ function draw() {
     gl.bindVertexArray(n.vaoData.vao);
     gl.uniform1i(locs.mode, 0);
 
-    function uniformTexture(texloc,hastexloc,tex,index) {
-      let hasTexture = false;
-      if (tex) {
-        if (!tex.glTexture && tex.image.complete) {
-          window.uploadTextureToGPU(tex);
-        }
-        if (tex.glTexture) {
-          gl.activeTexture(gl["TEXTURE"+index]);
-          gl.bindTexture(gl.TEXTURE_2D, tex.glTexture);
-          gl.uniform1i(texloc, index);
-          hasTexture = true;
-        }
-      }
-      gl.uniform1i(hastexloc, hasTexture ? 1 : 0);
-    }
-
-    // Albedo Texture
-    if (n.material) uniformTexture(locs.albedoTex,locs.hasAlbedo,n.material.albedoTex,0)
-    else gl.uniform1i(locs.hasAlbedo, 0);
-
-    if (n.material) uniformTexture(locs.normalTex,locs.hasNormal,n.material.normalTex,1)
-    else gl.uniform1i(locs.hasNormal, 0);
-
-    let color = [0.8,0.8,0.8,1.0];
-    if (n.material) color = [...n.material.color, 1];
-    gl.uniform4fv(locs.color, color);
-
-    let emittance = [0,0,0];
-    if (n.material) emittance = n.material.emittance.map(v=>v*n.material.emissionIntensity);
-    gl.uniform3fv(locs.emittance, emittance);
+    setMaterialUniforms(n.material);
 
     gl.drawElements(gl.TRIANGLES, n.vaoData.count, gl.UNSIGNED_SHORT, 0);
     
@@ -526,12 +583,152 @@ const renderList = () => {
   });
 };
 
-const renderAssets = () => {
+
+const sphereData = GeoGen.sphere();
+const sphereGeo = window.createVAOWithBuffers(sphereData.p, sphereData.n, sphereData.i, sphereData.u);
+/**
+ * Generates a DataURL for a material preview using the GLOBAL gl context.
+ * Renders to a temporary FBO to avoid flickering the main canvas.
+ */
+function generatePreview(callback,size) {
+  const gl = window.gl; 
+  if (!gl) {
+    console.error("Global WebGL context 'gl' not found.");
+    return "";
+  }
+
+  // 1. Create temporary resources on the global context
+  const targetTexture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, targetTexture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  
+  const depthBuffer = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, depthBuffer);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, size, size);
+
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, targetTexture, 0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthBuffer);
+
+  // 3. Render State
+  gl.viewport(0, 0, size, size);
+  gl.clearColor(0, 0, 0, 0); // Dark grey background for preview
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+
+  callback();
+
+  // 4. Synchronous Readback
+  const pixels = new Uint8Array(size * size * 4);
+  gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+
+  // 5. Cleanup FBO and restore main canvas binding
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(fb);
+  gl.deleteTexture(targetTexture);
+  gl.deleteRenderbuffer(depthBuffer);
+
+  // 6. Convert pixels to DataURL (with Y-flip)
+  const canvas2d = document.createElement('canvas');
+  canvas2d.width = size;
+  canvas2d.height = size;
+  const ctx2d = canvas2d.getContext('2d');
+  const imgData = ctx2d.createImageData(size, size);
+
+  for (let y = 0; y < size; y++) {
+    const srcRow = (size - 1 - y) * size * 4;
+    const dstRow = y * size * 4;
+    imgData.data.set(pixels.subarray(srcRow, srcRow + size * 4), dstRow);
+  }
+  ctx2d.putImageData(imgData, 0, 0);
+
+  return canvas2d.toDataURL("image/png");
+}
+function generateMaterialPreview(material, size = 256) { 
+  const url = generatePreview(function(){
+    // 2. Setup Scene Matrices
+    const projection = mat4.perspective(mat4.create(), 0.6, 1, 0.1, 10);
+    const view = mat4.lookAt(mat4.create(), [0, 0, 4], [0, 0, 0], [0, 1, 0]);
+    const mvp = mat4.multiply(mat4.create(), projection, view);
+    const model = mat4.create();
+
+    // Use the global program and sphere geometry
+    if (prog && sphereGeo) {
+      gl.useProgram(prog);
+      gl.bindVertexArray(sphereGeo.vao);
+
+      // Set Uniforms using the global 'locs' object
+      gl.uniformMatrix4fv(locs.mvp, false, mvp);
+      gl.uniformMatrix4fv(locs.model, false, model);
+      gl.uniform1i(locs.mode, 0);
+      
+      setMaterialUniforms(material);
+
+      gl.drawElements(gl.TRIANGLES, sphereGeo.count, gl.UNSIGNED_SHORT, 0);
+    }
+  },size);
+  material.urlData = url;
+  return url;
+}
+var previewMaterial = new Material("Preview Material",0,[0.6,0.6,0.6],0.5,[0,0,0]);
+function generateModelPreview(modeldata, size = 256) {
+  const modelObj = new Model("",previewMaterial,modeldata);
+  if (!modelObj.veoData) modelObj.updateGeo();
+
+  const url = generatePreview(function(){
+    const bounds = modelObj.getBounds() || { min: [-1, -1, -1], max: [1, 1, 1] };
+    const center = [
+      (bounds.min[0] + bounds.max[0]) / 2,
+      (bounds.min[1] + bounds.max[1]) / 2,
+      (bounds.min[2] + bounds.max[2]) / 2
+    ];
+    const diag = vec3.distance(bounds.min, bounds.max);
+
+    // 2. Setup Scene Matrices
+    const dist = diag; 
+    const camPos = [center[0] + dist, center[1] + dist * 0.7, center[2] + dist];
+
+    const projection = mat4.perspective(mat4.create(), 0.6, 1, 0.1, diag * 10);
+    const view = mat4.lookAt(mat4.create(), camPos, center, [0, 1, 0]);
+    const mvp = mat4.multiply(mat4.create(), projection, view);
+    const model = mat4.create();
+
+    // Use the global program and sphere geometry
+    if (prog && modelObj.vaoData) {
+      gl.useProgram(prog);
+      gl.bindVertexArray(modelObj.vaoData.vao);
+
+      // Set Uniforms using the global 'locs' object
+      gl.uniformMatrix4fv(locs.mvp, false, mvp);
+      gl.uniformMatrix4fv(locs.model, false, model);
+      gl.uniform1i(locs.mode, 0);
+      
+      setMaterialUniforms(modelObj.material);
+
+      gl.drawElements(gl.TRIANGLES, modelObj.vaoData.count, gl.UNSIGNED_SHORT, 0);
+    }
+  },size);
+
+  modelObj.model.previewUrl = url;
+  return url;
+}
+
+const renderPreview = (a, size) => {
+  if (a instanceof Texture) return a.url;
+  if (a instanceof HDRTexture) return a.generateThumbnail(size);
+  if (a instanceof Material) return a.urlData ? a.urlData : generateMaterialPreview(a,size);
+  if (a instanceof ModelData) return a.previewUrl ? a.previewUrl : generateModelPreview(a,size);
+}
+const renderAssets = async () => {
+  await Promise.all(State.assets.map(v=>v.loaded).filter(v=>v));
   const root = document.getElementById('asset-list'); root.innerHTML = '';
   State.assets.forEach(a => {
     const el = document.createElement('div'); el.className = 'asset-item'; el.draggable = true;
     let icon = "📄"; if(a instanceof Material) icon="🎨"; if(a instanceof Texture) icon="🖼️"; if(a instanceof HDRTexture) icon="🌌"; if(a instanceof ModelData) icon="📐";
-    el.innerHTML = `<div class="asset-icon">${icon}</div><div class="asset-name">${a.name}</div>`;
+    let preview = renderPreview(a,256);
+    preview = preview ? `<img class="asset-preview" src="${preview}"></img>` : `<div class="asset-icon">${icon}</div>`;
+    el.innerHTML = preview+`<div class="asset-name">${a.name}</div>`;
     el.onclick = () => selectAsset(a);
     el.ondragstart = e => { e.dataTransfer.setData('assetId', a.id); e.dataTransfer.setData('type', a.type); };
     root.appendChild(el);
@@ -548,6 +745,7 @@ const createAssetSlot = (guiFolder, label, assetType, assetParent, assetPath) =>
     const id = e.dataTransfer.getData('assetId');
     const asset = State.assets.find(a => a.id === id);
     if (asset && asset instanceof assetType) { 
+      if (slot.changeListener) slot.changeListener();
       assetParent[assetPath] = asset;
       renderInspector();
     }
@@ -557,6 +755,7 @@ const createAssetSlot = (guiFolder, label, assetType, assetParent, assetPath) =>
     if (assetParent[assetPath]) selectAsset(assetParent[assetPath]);
   }
   guiFolder.domElement.appendChild(slot);
+  slot.onChange = e => slot.changeListener = e;
   return slot;
 };
 
@@ -612,7 +811,11 @@ const renderInspector = () => {
   } else if (State.selectedAsset) {
     const a = State.selectedAsset;
     gui.add(a, 'name').name('Asset Name').onFinishChange(renderAssets);
+    var img = document.createElement('img');
+    img.src = renderPreview(a,256);
+    gui.domElement.appendChild(img);
     if (a instanceof ModelData) {
+      var updateModel = ()=>{ generateModelPreview(a); img.src = renderPreview(a,256); renderAssets(); }
       function updateModelGeometry() {
         a.generateBVH();
         for (var i = 0; i < State.nodes.length; i++) {
@@ -629,30 +832,33 @@ const renderInspector = () => {
       a.rotY90deg = ()=>{a.bakeTransform(mat4.fromRotation(mat4.create(), Math.PI / 2, [0, 1, 0]));updateModelGeometry();}
       a.rotZ90deg = ()=>{a.bakeTransform(mat4.fromRotation(mat4.create(), Math.PI / 2, [0, 0, 1]));updateModelGeometry();}
       
-      gui.add(a, 'rotX90deg').name('Rotate X 90 degrees');
-      gui.add(a, 'rotY90deg').name('Rotate Y 90 degrees');
-      gui.add(a, 'rotZ90deg').name('Rotate Z 90 degrees');
-
+      gui.add(a, 'rotX90deg').name('Rotate X 90 degrees').onChange(updateModel);
+      gui.add(a, 'rotY90deg').name('Rotate Y 90 degrees').onChange(updateModel);
+      gui.add(a, 'rotZ90deg').name('Rotate Z 90 degrees').onChange(updateModel);
 
       a.faceNormals = ()=>{a.calculateFaceNormals();updateModelGeometry();}
       a.smoothNormals = ()=>{a.calculateSmoothNormals();updateModelGeometry();}
       a.sphericalUVs = ()=>{a.calculateSphericalUVs();updateModelGeometry();}
-      gui.add(a, 'faceNormals').name('Calculate Face Normals');
-      gui.add(a, 'smoothNormals').name('Calculate Smooth Normals');
+      gui.add(a, 'faceNormals').name('Calculate Face Normals').onChange(updateModel);
+      gui.add(a, 'smoothNormals').name('Calculate Smooth Normals').onChange(updateModel);
     }
     if (a instanceof Material) {
-      gui.addColor(a, 'color').name('Albedo');
-      gui.addColor(a, 'emittance').name('Emittance');
-      gui.add(a, 'emissionIntensity').name('Emission Intensity');
-      gui.add(a, 'roughness', 0, 1).name('Roughness');
+      var updateMat = ()=>{ generateMaterialPreview(a); img.src = renderPreview(a,256); renderAssets(); }
+      gui.add(a,'type',{"Plastic":0,"Metal":1,"Glass":2}).name('Type').onChange(updateMat);
+      gui.add(a, 'roughness', 0, 1).name('Roughness').onChange(updateMat);
+      gui.addColor(a, 'color').name('Albedo').onChange(updateMat);
+      gui.addColor(a, 'emittance').name('Emittance').onChange(updateMat);
+      gui.add(a, 'emissionIntensity').name('Emission Intensity').onChange(updateMat);
+      gui.add(a, 'ior').name('Index of Refraction').onChange(updateMat);
+      gui.add(a, 'concentration').name('Concentration').onChange(updateMat);
       const t = gui.addFolder('Albedo Texture');
-      var aslot = createAssetSlot(t, "Drop Texture Here", Texture, a, 'albedoTex');
+      var aslot = createAssetSlot(t, "Drop Texture Here", Texture, a, 'albedoTex').onChange(updateMat);
       a.removeAlbedoTex = ()=>{ a.albedoTex = null; aslot.textContent = "Drop Texture Here"; }
-      t.add(a, 'removeAlbedoTex').name('Remove Texture');
+      t.add(a, 'removeAlbedoTex').name('Remove Texture').onChange(updateMat);
       const nt = gui.addFolder('Normal Texture');
-      var nslot = createAssetSlot(nt, "Drop Texture Here", Texture, a, 'normalTex');
+      var nslot = createAssetSlot(nt, "Drop Texture Here", Texture, a, 'normalTex').onChange(updateMat);
       a.removeNormalTex = ()=>{ a.normalTex = null; nslot.textContent = "Drop Texture Here"; }
-      nt.add(a, 'removeNormalTex').name('Remove Texture');
+      nt.add(a, 'removeNormalTex').name('Remove Texture').onChange(updateMat);
     }
   }
 };
@@ -676,18 +882,18 @@ const renderSceneInspector = () => {
 }
 
 // Canvas Drop for Models & Materials
-canvas.ondragover = e => e.preventDefault();
-canvas.ondrop = e => {
+gl_canvas.ondragover = e => e.preventDefault();
+gl_canvas.ondrop = e => {
   const id = e.dataTransfer.getData('assetId');
   const asset = State.assets.find(a => a.id === id);
   if (asset && (asset instanceof ModelData || asset instanceof Material)) {
     if (asset instanceof ModelData) {
       // Drop Model: Create Model Node automatically
-      const n = State.scene.newModel(defaultMaterial, asset); 
+      const n = State.scene.newModel("Model ("+asset.name+")",defaultMaterial, asset); 
       State.nodes.push(n); selectNode(n.id);
     } else {
       // Drop Material: Find intersected Node
-      const ray = MathUtils.getRay(e.clientX, e.clientY, canvas, Cam.proj, Cam.view);
+      const ray = MathUtils.getRay(e.clientX, e.clientY, gl_canvas, Cam.proj, Cam.view);
       let nearest=Infinity, hit=null;
       State.nodes.forEach(n => { const t=MathUtils.rayAABB(ray, n.getBounds().min, n.getBounds().max); if(t && t<nearest){nearest=t; hit=n;} });
       if(hit) { hit.material = asset; selectNode(hit.id); }
@@ -699,21 +905,20 @@ canvas.ondrop = e => {
 document.getElementById('primitiveSelect').oninput = (e) => {
   const type = e.target.value;
   let n;
+  var mat = State.assets.filter(a=>a instanceof Material)[0] || defaultMaterial;
   if (type === 'cube') {
-    n = State.scene.newCube(defaultMaterial,-1,0,-1,1,2,1);
-    n.name = "Cube " + State.idCounter;
+    n = State.scene.newCube("Cube "+State.idCounter,mat,-1,0,-1,1,2,1);
   } else if (type === 'sphere') {
-    n = State.scene.newSphere(defaultMaterial,0,1,0,1);
+    n = State.scene.newSphere("Sphere "+State.idCounter,mat,0,1,0,1);
     n.name = "Sphere " + State.idCounter;
   } else if (type === 'cylinder') {
-    n = State.scene.newFrustum(defaultMaterial).orient(0,0,0,1,0,2,0,1);
-    n.name = "Cylinder " + State.idCounter;
+    n = State.scene.newFrustum("Cylinder "+State.idCounter,mat).orient(0,0,0,1,0,2,0,1);
+  } else if (type === 'cone') {
+    n = State.scene.newFrustum("Cone "+State.idCounter,mat).orient(0,0,0,1,0,2,0,0); n.icon = "🍦";
   } else if (type === 'torus') {
-    n = State.scene.newTorus(defaultMaterial,1,0.5).translate(0,1,0).scaleMult(2,2,2);
-    n.name = "Torus " + State.idCounter;
+    n = State.scene.newTorus("Torus "+State.idCounter,mat,1,0.5).translate(0,1,0).scaleMult(2,2,2);
   } else if (type === 'plane') {
-    n = State.scene.newPlane(defaultMaterial,0,1,0,0);
-    n.name = "Plane " + State.idCounter;
+    n = State.scene.newPlane("Plane "+State.idCounter,mat,0,1,0,0);
   }
   
   if (n) { State.nodes.push(n); selectNode(n.id); }
@@ -723,6 +928,7 @@ document.getElementById('primitiveSelect').oninput = (e) => {
 window.createMaterial = () => {
   const mat = new Material("Material "+(State.assets.length+1),0,[1,1,1],0.5,[0,0,0]);
   State.assets.push(mat); renderAssets(); selectAsset(mat);
+  return mat;
 };
 window.handleUpload = (input) => {
   const files = Array.from(input.files);
@@ -766,25 +972,50 @@ window.handleUpload = (input) => {
 const ctxMenu = document.getElementById('context-menu');
 document.getElementById('ctx-delete').onclick = () => { 
   if (State.selected) State.nodes = State.nodes.filter(n => n.id !== State.selected.id); 
-  if (State.selectedAsset) State.assets = State.assets.filter(n => n.id !== State.selectedAsset.id); 
+  if (State.selectedAsset) {
+    var a = State.selectedAsset;
+    State.assets = State.assets.filter(n => n.id !== a.id); 
+    if (State.background == a) State.background = null;
+    State.nodes.forEach(n=>{
+      if (a instanceof Material && n.material == a) n.material = defaultMaterial; 
+      if (a instanceof Texture) {
+        if (n.albedoTex == a) n.albedoTex = null;
+        if (n.normalTex == a) n.normalTex = null;
+        if (n.heightTex == a) n.heightTex = null;
+        if (n.roughnessTex == a) n.roughnessTex = null;
+      }
+    });
+  }
   selectAsset(null);
   selectNode(null);
   ctxMenu.style.display='none';
 };
 window.onclick = () => ctxMenu.style.display='none';
 window.onkeydown = e => { 
-  if(e.key==='Delete'||e.key==='Backspace') document.getElementById('ctx-delete').click(); 
-  if(e.key==='t' && !e.target.tagName.match(/INPUT/)) setTool('t'); 
-  if(e.key==='r' && !e.target.tagName.match(/INPUT/)) setTool('r'); 
-  if(e.key==='s' && !e.target.tagName.match(/INPUT/)) setTool('s');
-  if(e.key==='b' && !e.target.tagName.match(/INPUT/)) renderSceneInspector();
+  if (e.key === 'Delete' || e.key === 'Backspace') document.getElementById('ctx-delete').click(); 
+  if (e.target.tagName.match(/INPUT/)) return;
+  if (e.key === 't') setTool('t'); 
+  if (e.key === 'r') setTool('r'); 
+  if (e.key === 's') setTool('s');
+  if (e.key === 'b') renderSceneInspector();
+  if (e.key === 'c' && State.selected) Cam.target = vec3.fromValues(...State.selected.position);
 };
 
 const setTool = t => { State.tool=t; document.querySelectorAll('.tool-btn').forEach(b=>b.classList.toggle('active', b.id==='tool-'+t)); };
 ['tool-t','tool-r','tool-s'].forEach(id => document.getElementById(id).onclick = () => setTool(id.split('-')[1]));
 
-canvas.onmousedown = e => {
-  const ray = MathUtils.getRay(e.clientX, e.clientY, canvas, Cam.proj, Cam.view), gizmo = Interact.testGizmo(ray);
+
+function updateSceneCam() {
+  const c = document.getElementById('gpuCanvas');
+  Cam.update(c.width/c.height);
+  var cam = State.scene.camera;
+  cam.position = vec3.fromValues(...Cam.position);
+  cam.target = vec3.fromValues(...Cam.target);
+  cam.updateRays();
+  if (renderer) renderer.frame = 0;
+}
+gl_canvas.onmousedown = e => {
+  const ray = MathUtils.getRay(e.clientX, e.clientY, gl_canvas, Cam.proj, Cam.view), gizmo = Interact.testGizmo(ray);
   if (gizmo && e.button===0) { Interact.startDrag(gizmo, ray); return; }
   let nearest=Infinity, hit=null;
   State.nodes.forEach(n => { const t=MathUtils.rayAABB(ray, n.getBounds().min, n.getBounds().max); if(t && t<nearest){nearest=t; hit=n;} });
@@ -804,7 +1035,7 @@ document.getElementById('gpuCanvas').onmousedown = e => {
   Cam.updateSceneCam = true;
 };
 window.onmousemove = e => {
-  if (Interact.activeAxis) Interact.updateDrag(MathUtils.getRay(e.clientX, e.clientY, canvas, Cam.proj, Cam.view));
+  if (Interact.activeAxis) Interact.updateDrag(MathUtils.getRay(e.clientX, e.clientY, gl_canvas, Cam.proj, Cam.view));
   else if (Cam.isOrbiting || Cam.isPanning) {
     const dx = e.clientX - Cam.lastM[0], dy = e.clientY - Cam.lastM[1]; Cam.lastM = [e.clientX, e.clientY];
     if (Cam.isOrbiting) { 
@@ -815,15 +1046,21 @@ window.onmousemove = e => {
       vec3.scaleAndAdd(Cam.target, Cam.target, [Cam.view[0], Cam.view[4], Cam.view[8]], -dx*dist);
       vec3.scaleAndAdd(Cam.target, Cam.target, [Cam.view[1], Cam.view[5], Cam.view[9]], dy*dist); 
     }
+    if (Cam.updateSceneCam) updateSceneCam();
   }
 };
 window.onmouseup = () => { 
   Interact.activeAxis = null; 
   Cam.isOrbiting = Cam.isPanning=false;
 };
-canvas.onwheel = e => { 
+gl_canvas.onwheel = e => { 
   Cam.orbit.radius = Math.max(1, Cam.orbit.radius+e.deltaY*0.01); 
   e.preventDefault();
+};
+document.getElementById('gpuCanvas').onwheel = e => {
+  // Shift+LMB OR RMB to Pan
+  gl_canvas.onwheel(e);
+  updateSceneCam();
 };
 
 const setupGutter = (gid, pid, axis) => {
@@ -842,15 +1079,15 @@ function loop() {
   if (renderActive) {
     renderActive();
   } else {
-    Cam.update(canvas.width/canvas.height); 
+    Cam.update(gl_canvas.width/gl_canvas.height); 
     draw();
   }
   requestAnimationFrame(loop);
 }
 
 // Initial Setup
-const initNode = State.scene.newCube(defaultMaterial,-1,0,-1,1,2,1); initNode.name = "Cube "+State.idCounter; State.nodes.push(initNode); selectNode(initNode.id);
-createMaterial(); renderAssets(); loop();
+const initNode = State.scene.newCube("Cube 1",createMaterial(),-1,0,-1,1,2,1);
+State.nodes.push(initNode); selectNode(initNode.id); renderAssets(); loop();
 
 function openRenderPopup() {
   const modal = document.getElementById('render-modal');
@@ -928,10 +1165,9 @@ function closeRenderPopup() {
   document.getElementById('btn-start-render').textContent = "START RENDER";
 }
 
-
 // Logic to resize canvas when user changes inputs
 document.getElementById('render-w').onchange = (e) => {
-  if (renderActive) return;
+  //if (renderActive) return;
   const canvas = document.getElementById('gpuCanvas');
   canvas.width = e.target.value;
   var cam = State.scene.camera;
@@ -940,7 +1176,7 @@ document.getElementById('render-w').onchange = (e) => {
   if (renderer) renderer.frame = 0;
 };
 document.getElementById('render-h').onchange = (e) => {
-  if (renderActive) return;
+  //if (renderActive) return;
   const canvas = document.getElementById('gpuCanvas');
   canvas.height = e.target.value;
   var cam = State.scene.camera;

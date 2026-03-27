@@ -13,7 +13,7 @@ struct Ray {
   origin: vec3f,
   direction: vec3f
 };
-struct SceneParams { 
+struct SceneParams {
   frame_count: u32, width: u32, height: u32, padding: u32,
   eye: vec4f, ray00: vec4f, ray10: vec4f, ray01: vec4f, ray11: vec4f 
 };

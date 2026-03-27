@@ -3,7 +3,7 @@
 var SelectedScene = 0; 
 var SceneList = [
   {
-    name: "POM & Normals Box",
+    name: "Rook & Diamond",
     load: async function() {},
     create: async function(canvas) {
       canvas.width = 400;
@@ -86,16 +86,16 @@ var SceneList = [
       var matRedGlass = new Material("Red Glass",2,[1.0, 0.2, 0.2], 0.0, [0, 0, 0]);
       var matUraniumGlass = new Material("Uranium Glass",2,[0.4, 1.0, 0.4], 0.0, [0, 0.01, 0]);
 
-      scene.newPlane(matWhite, 0, 1, 0, 0);    // Floor (POM Textured)
-      // scene.newPlane(matWhite, 0, -1, 0, -3.5);   // Ceiling
-      // scene.newPlane(matWhite, 0, 0, 1, -3.0);    // Back wall
-      // scene.newPlane(matWhite, 0, 0, -1, -10.0);    // Front wall
-      // scene.newPlane(matRed, 1, 0, 0, -2.5);      // Left wall
-      // scene.newPlane(matGreen, -1, 0, 0, -2.5);   // Right wall
+      scene.newPlane("Floor",matWhite, 0, 1, 0, 0);    // Floor (POM Textured)
+      // scene.newPlane("Ceiling",matWhite, 0, -1, 0, -3.5);   // Ceiling
+      // scene.newPlane("Back",matWhite, 0, 0, 1, -3.0);    // Back wall
+      // scene.newPlane("Front",matWhite, 0, 0, -1, -10.0);    // Front wall
+      // scene.newPlane("Left",matRed, 1, 0, 0, -2.5);      // Left wall
+      // scene.newPlane("Right",matGreen, -1, 0, 0, -2.5);   // Right wall
       
-      scene.newSphere(matLight, 0, 3.5, 0, 0.5);
-      //scene.newSphere(matBlueGlass, -1.6, 0.5, -1.4, 0.5);
-      //scene.newSphere(matGlass, 0, 0, 0, 2);
+      scene.newSphere("Light",matLight, 0, 3.5, 0, 0.5);
+      //scene.newSphere("Blue Ball",matBlueGlass, -1.6, 0.5, -1.4, 0.5);
+      //scene.newSphere("Glass Ball",matGlass, 0, 0, 0, 2);
 
       // var bunnyMaterial = new Material("Bunny Material",0,[1.0, 1.0, 1.0], 0.5, [0, 0, 0], {
       //   albedoTex: bunnyColor,
@@ -103,23 +103,22 @@ var SceneList = [
       //   uvScale: [1.0, -1.0],
       // });
       
-      // var model = scene.newModel(matDiamond,dragonModel);
+      // var model = scene.newModel("Diamond",matDiamond,dragonModel);
       //model.translate(0,1,0);
 
       var matDiamond = new Material("Diamond Material",2,[1.0, 1.0, 1.0], 0.0, [0, 0, 0],{ior:2.4});
-      var model = scene.newModel(matDiamond,diamondModel,false);
-      model.name = "Rook";
-      var rook = scene.newModel(matRedGlass,rookModel,false).translate(-1,0,-1);
+      var model = scene.newModel("Diamond",matDiamond,diamondModel,false);
+      scene.newModel("Rook",matRedGlass,rookModel,false).translate(-1,0,-1);
       
-      //var t = scene.newTorus(matRedGlass,0.5);
+      //var t = scene.newTorus("Torus",matRedGlass,0.5);
       //t.translate(0,1,0);
-      //scene.newFrustum(matRedGlass).orient(-1.5,0,-1,0.2,-1.5,1,-1,0.2)
+      //scene.newFrustum("Frustum",matRedGlass).orient(-1.5,0,-1,0.2,-1.5,1,-1,0.2)
 
-      // var model2 = scene.newModel(matCeramic,bunnyModel);
+      // var model2 = scene.newModel("Bunny",matCeramic,bunnyModel);
       // model2.scaleMult(0.5,0.5,0.5);
       // model2.translate(-1,0.5,1);
 
-      //let box = scene.newCube(toyBox, 0.2, 0.4, -0.2, 1.0, 1.2, 0.6);
+      //let box = scene.newCube("Toy Box",toyBox, 0.2, 0.4, -0.2, 1.0, 1.2, 0.6);
       //quat.setAxisAngle(box.rotation, [0, 1, 0], -20 * Math.PI / 180); 
       //box.updateMatrix();
 
@@ -129,7 +128,7 @@ var SceneList = [
     }
   },
   {
-    name: "POM & Normals Box",
+    name: "Dragon & Bunny Mirror Room",
     load: async function() {},
     create: async function(canvas) {
       // canvas.width = 400;
@@ -180,21 +179,21 @@ var SceneList = [
       var matRedGlass = new Material("Red Glass",2,[1.0, 0.2, 0.2], 0.0, [0, 0, 0]);
       var matUraniumGlass = new Material("Uranium Glass",2,[0.4, 1.0, 0.4], 0.0, [0, 0.01, 0]);
 
-      scene.newPlane(matCeramic, 0, 1, 0, 0);    // Floor (POM Textured)
-      scene.newPlane(matWhite, 0, -1, 0, -3.5);   // Ceiling
-      scene.newPlane(matMetal, 0, 0, 1, -3.0);    // Back wall
-      scene.newPlane(matMetal, 0, 0, -1, -6.0);    // Front wall
-      scene.newPlane(matRed, 1, 0, 0, -2.5);      // Left wall
-      scene.newPlane(matGreen, -1, 0, 0, -2.5);   // Right wall
+      scene.newPlane("Floor",matCeramic, 0, 1, 0, 0);    // Floor (POM Textured)
+      scene.newPlane("Ceiling",matWhite, 0, -1, 0, -3.5);   // Ceiling
+      scene.newPlane("Back",matMetal, 0, 0, 1, -3.0);    // Back wall
+      scene.newPlane("Front",matMetal, 0, 0, -1, -10.0);    // Front wall
+      scene.newPlane("Left",matRed, 1, 0, 0, -2.5);      // Left wall
+      scene.newPlane("Right",matGreen, -1, 0, 0, -2.5);   // Right wall
       
-      scene.newSphere(matLight, 0, 3.5, 0, 0.5);
-      //scene.newSphere(matBlueGlass, -1.6, 0.5, -1.4, 0.5);
-      //scene.newSphere(matGlass, 0, 0, 0, 2);
+      scene.newSphere("Light",matLight, 0, 3.5, 0, 0.5);
+      //scene.newSphere("Blue Ball",matBlueGlass, -1.6, 0.5, -1.4, 0.5);
+      //scene.newSphere("Glass Ball",matGlass, 0, 0, 0, 2);
 
-      var model = scene.newModel(matBlueGlass,dragonModel);
+      var model = scene.newModel("Dragon",matBlueGlass,dragonModel);
       quat.rotateY(model.rotation, model.rotation, -20 * Math.PI / 180);
       model.scaleMult(1.5,1.5,1.5);
-      var model2 = scene.newModel(matCeramic,bunnyModel);
+      var model2 = scene.newModel("Bunny",matCeramic,bunnyModel);
       model2.scaleMult(0.5,0.5,0.5);
       model2.translate(-1,0.5,1);
 
@@ -215,8 +214,8 @@ var SceneList = [
       cam.setPosition(3, 2.5, 5);
       cam.lookAt(0, 0.8, 0);
 
-      var teapotModel = new ModelData().loadOBJ('assets/teapot2.obj');
-      var diamondModel = new ModelData().loadOBJ('assets/diamond.obj');
+      var teapotModel = new ModelData("Teapot Model").loadOBJ('assets/teapot2.obj');
+      var diamondModel = new ModelData("Diamond Model").loadOBJ('assets/diamond.obj');
 
       scene.background = new HDRTexture([0.8,0.85,1,1]);
 
@@ -237,22 +236,22 @@ var SceneList = [
       var matLight = new Material("Light", 0, [0,0,0], 1, [20, 18, 15]);
 
       // Lights
-      scene.newSphere(matLight, 0, 5, 0, 0.5); // Top light
-      scene.newSphere(matLight, 4, 2, 2, 0.2); // Rim light
+      scene.newSphere("Top Light",matLight, 0, 5, 0, 0.5); // Top light
+      scene.newSphere("Rim Light",matLight, 4, 2, 2, 0.2); // Rim light
 
-      scene.newPlane(matFloor, 0, 1, 0, 0);
+      scene.newPlane("Floor",matFloor, 0, 1, 0, 0);
 
       // The Smooth Teapot
-      var teapot = scene.newModel(matGold, teapotModel);
+      var teapot = scene.newModel("Teapot",matGold, teapotModel);
       teapot.scaleMult(1.2, 1.2, 1.2);
       teapot.translate(0, 1, 0);
 
       // The Diamonds
-      // scene.newModel(matDiamond, diamondModel).translate(1.5, 0, 1);
-      // scene.newModel(matDiamond, diamondModel).translate(-1.5, 0, 1);
+      // scene.newModel("Diamond 1",matDiamond, diamondModel).translate(1.5, 0, 1);
+      // scene.newModel("Diamond 2",matDiamond, diamondModel).translate(-1.5, 0, 1);
 
       // NEW FRUSTUM: Using it as a glass pedestal
-      scene.newFrustum(matGlass).orient(0,0,0, 1, 0,1,0, 0.7);
+      scene.newFrustum("Pedestal",matGlass).orient(0,0,0, 1, 0,1,0, 0.7);
 
       scene.bounces = 12;
       return scene;
@@ -270,11 +269,11 @@ var SceneList = [
       scene.camera.setPosition(0, 5, 6);
       scene.camera.lookAt(0, 0, 0);
 
-      scene.background = new HDRTexture([0.001,0.001,0.001,1]);
-      //scene.background = new HDRTexture('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/venice_sunset_2k.hdr');
+      //scene.background = new HDRTexture([0.001,0.001,0.001,1]);
+      scene.background = new HDRTexture('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/venice_sunset_2k.hdr',"Venice Sunset");
       //scene.background = new HDRTexture('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/abandoned_greenhouse_2k.hdr');
 
-      var diamondModel = new ModelData().loadOBJ('assets/diamond.obj');
+      var diamondModel = new ModelData("Diamond Model").loadOBJ('assets/diamond.obj');
 
       await Promise.all([
         scene.background.loaded,
@@ -288,25 +287,24 @@ var SceneList = [
       var matLight = new Material("Light Material", 0, [0, 0, 0], 1, [15, 15, 15]);     // Overheard light
       
       // A function to get a random colorful material
-      var matIndex = 0;
+      var index = 0;
       function getRandomMaterial() {
-        matIndex++;
         const isEmissive = rng() < 0.2; 
         if (isEmissive) {
           const r = rng()*19+1;
           const g = rng()*19+1;
           const b = rng()*19+1;
-          return new Material("Emissive "+matIndex, 0, [0, 0, 0], 1.0, [r, g, b]);
+          return new Material("Emissive "+index, 0, [0, 0, 0], 1.0, [r, g, b]);
         }
         const types = [0, 1, 2]; // Diffuse, Metal, Glass
         const type = types[Math.floor(rng() * types.length)];
         const color = [rng(), rng(), rng()];
         const roughness = type != 0 && rng() < 0.3 ? 0 : rng();
-        return new Material("Material "+matIndex, type, color, roughness, [0, 0, 0]);
+        return new Material("Material "+index, type, color, roughness, [0, 0, 0]);
       }
 
       // 2. Add Environment
-      scene.newPlane(matGround, 0, 1, 0, 0); // Ground
+      scene.newPlane("Ground",matGround, 0, 1, 0, 0); // Ground
       //scene.newSphere(matLight, 0, 10, 0, 1); // Sun/Light source
       
       // 3. Generate Non-Intersecting Spheres
@@ -345,18 +343,19 @@ var SceneList = [
         }
 
         if (!collision) {
+          index++;
           const mat = getRandomMaterial();
           var r = rng();
           if (r < 0.5) {
-            scene.newSphere(mat, x, y, z, radius);
+            scene.newSphere("Sphere "+index,mat, x, y, z, radius);
           } else if (r < 1) {
-            scene.newCube(mat, x-radius, y-radius, z-radius, x+radius, y+radius, z+radius);
+            scene.newCube("Cube "+index, mat, x-radius, y-radius, z-radius, x+radius, y+radius, z+radius);
           } else if (r < 0.6) {
-            scene.newFrustum(mat).orient(x, y-radius, z, radius, x, y+radius, z, radius);
+            scene.newFrustum("Cylinder "+index, mat).orient(x, y-radius, z, radius, x, y+radius, z, radius);
           } else if (r < 0.8) {
-            scene.newTorus(mat,radius*0.75,radius*0.25).translate(x,y-radius*0.5,z);
+            scene.newTorus("Torus "+index, mat, radius*0.75,radius*0.25).translate(x,y-radius*0.5,z);
           } else {
-            scene.newModel(mat,diamondModel,true).translate(x,y-radius,z).scaleMult(radius,radius,radius);
+            scene.newModel("Diamond "+index, mat, diamondModel,true).translate(x,y-radius,z).scaleMult(radius,radius,radius);
           }
           // Store metadata for the next collision check
           spheres.push({ x, y, z, radius });
@@ -368,7 +367,82 @@ var SceneList = [
       scene.bounces = 6;
       return scene;
     }
-  }
+  },
+  {
+    name: "Bunny",
+    load: async function() {},
+    create: async function(canvas) {
+      canvas.width = 400;
+      canvas.height = 304;
+      // canvas.width = 1024;
+      // canvas.height = 768;
+      
+      var scene = new Scene(canvas);
+
+      //var cam = scene.camera;
+      //cam.lookAt(0,0.5,0);
+      //cam.setPosition(0,0,4.5);
+      
+      // Preload our new textures
+      // var woodTex = new Texture('https://i.ibb.co/0RnQ8mp0/wood.png');
+      // var normalTex = new Texture('https://i.ibb.co/dJzqsKry/normal.png');
+      // var dispTex = new Texture('https://i.ibb.co/0ywvFnyh/disp.png');
+
+      var bunnyModel = new ModelData('Bunny').loadOBJ('assets/bunny/model.obj');
+      var bunnyColor = new Texture('assets/bunny/color.jpg','Bunny Color');
+      var bunnyNormal = new Texture('assets/bunny/normal.png', 'Bunny Normals');
+
+      scene.background = new HDRTexture('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/venice_sunset_2k.hdr');
+      
+      await Promise.all([
+        // woodTex.loaded, 
+        // normalTex.loaded, 
+        // dispTex.loaded, 
+        bunnyModel.loaded,
+        bunnyColor.loaded,
+        bunnyNormal.loaded,
+        scene.background.loaded
+      ]);
+      bunnyModel.renormalize();
+      bunnyModel.generateBVH();
+
+      var matWhite = new Material("White",0,[0.8, 0.8, 0.8], 1.0, [0, 0, 0]);
+      var matLight = new Material("Light",0,[0.0, 0.0, 0.0], 1.0, [15, 15, 15]);
+
+      // Set up the robust POM material!
+      // var toyBox = new Material("Toy Box",0,[1.0, 1.0, 1.0], 0.5, [0, 0, 0], {
+      //   albedoTex: woodTex,
+      //   normalTex: normalTex,
+      //   heightTex: dispTex,
+      //   uvScale: [1.0, 1.0], // Scale of the texture on the plane
+      //   normalMultiplier: 1,
+      //   heightMultiplier: 0.15, // Positive means Depth Map (white=deep). Negative means Height Map (white=high).
+      //   heightSamp: 32,      // Number of raymarch steps
+      //   heightOffset: 0    // Shifts where the surface starts
+      // });
+
+      scene.newPlane("Floor",matWhite, 0, 1, 0, 0);    // Floor (POM Textured)
+      scene.newSphere("Light",matLight, 0, 3.5, 0, 0.5);
+
+      var bunnyMaterial = new Material("Bunny Material",0,[1.0, 1.0, 1.0], 0.5, [0, 0, 0], {
+        albedoTex: bunnyColor,
+        normalTex: bunnyNormal,
+        uvScale: [1.0, -1.0],
+      });
+
+      var model2 = scene.newModel("Bunny",bunnyMaterial,bunnyModel);
+      model2.scaleMult(0.5,0.5,0.5);
+      model2.translate(-1,0.5,1);
+
+      //let box = scene.newCube("Toy Box",toyBox, 0.2, 0.4, -0.2, 1.0, 1.2, 0.6);
+      //quat.setAxisAngle(box.rotation, [0, 1, 0], -20 * Math.PI / 180); 
+      //box.updateMatrix();
+
+      scene.bounces = 10;
+
+      return scene;
+    }
+  },
 ];
 
 function mulberry32(a) {
@@ -386,12 +460,15 @@ async function loadScene() {
   if (!confirm("This will override the current scene, do you wish to continue?")) return;
   SelectedScene = Number(prompt("Enter a scene number (0-3)")) || 0;
   if (SceneList[SelectedScene].load) await SceneList[SelectedScene].load();
+  const canvas = document.getElementById('gpuCanvas');
   var scene = await SceneList[SelectedScene].create(canvas);
+  document.getElementById('render-w').value = canvas.width;
+  document.getElementById('render-h').value = canvas.height;
   State.scene = scene;
-  Cam.position = scene.camera.position;
-  Cam.target = scene.camera.target;
+  Cam.updateOrbit(scene.camera.position,scene.camera.target);
   State.nodes = scene.objects;
 
+  State.assets = [];
   if (scene.background) {
     var data = scene.background.data;
     if (data.length == 4) {
@@ -401,6 +478,7 @@ async function loadScene() {
       State.backgroundColor = [1,1,1];
       State.backgroundIntensity = 1;
       State.background = scene.background;
+      State.assets.push(State.background);
     }
   }
 
@@ -410,8 +488,8 @@ async function loadScene() {
     if (max < 1) return;
     m.emittance = m.emittance.map(v=>v/max);
     m.emissionIntensity = max;
-  })
-  State.assets = materials;
+  });
+  State.assets = State.assets.concat(materials);
   State.assets = State.assets.concat(scene.getTextures());
   const uniqueModels = [];
   scene.objects.forEach(obj => {
