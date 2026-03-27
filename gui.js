@@ -261,7 +261,6 @@ window.gl = gl_canvas.getContext('webgl2', { antialias: true });
 // Prevent context menu to allow smooth RMB panning
 gl_canvas.addEventListener('contextmenu', e => e.preventDefault());
 
-const prog = gl.createProgram();
 const vs = `#version 300 es
   layout(location=0) in vec3 a_pos; 
   layout(location=1) in vec3 a_norm;
@@ -273,24 +272,36 @@ const vs = `#version 300 es
   out vec3 v_norm;
   out vec3 v_worldPos;
   out vec2 v_uv;
+  out vec3 v_viewDir;
+
+  uniform vec3 u_camPos;
 
   void main() { 
     vec4 worldPos = u_model * vec4(a_pos, 1.0);
     v_worldPos = worldPos.xyz;
-    gl_Position = u_mvp * vec4(a_pos, 1.0); 
-    v_norm = mat3(u_model) * a_norm; 
+    v_viewDir = normalize(u_camPos - worldPos.xyz);
+    v_norm = normalize(mat3(u_model) * a_norm); 
     v_uv = a_uv;
+    gl_Position = u_mvp * vec4(a_pos, 1.0); 
   }`;
 
+
 const fs = `#version 300 es
-  precision highp float; 
+  precision highp float;
+
   in vec3 v_norm; 
   in vec3 v_worldPos;
   in vec2 v_uv;
+  in vec3 v_viewDir;
 
   uniform vec4 u_color; 
   uniform vec3 u_emittance; 
+  uniform float u_roughness;
+  uniform float u_ior;
+  uniform float u_concentration;
+  uniform int u_type; // 0: Opaque, 1: Metal, 2: Glass
   uniform int u_mode; 
+  
   uniform sampler2D u_albedoTex;
   uniform sampler2D u_normalTex;
   uniform bool u_hasAlbedo;
@@ -298,47 +309,166 @@ const fs = `#version 300 es
 
   out vec4 outColor;
 
-  // Function to calculate normal from normal map using screen-space derivatives
+  // Full Fresnel Equation (Converted from your WGSL)
+  float fresnel(vec3 I, vec3 N, float ior1, float ior2) {
+    float cosi = clamp(dot(I, N), -1.0, 1.0);
+    float etai = ior1;
+    float etat = ior2;
+
+    if (cosi > 0.0) {
+      etai = ior2;
+      etat = ior1;
+    }
+
+    float sint = (etai / etat) * sqrt(max(0.0, 1.0 - cosi * cosi));
+
+    if (sint >= 1.0) {
+      return 1.0; // Total Internal Reflection
+    } else {
+      float cost = sqrt(max(0.0, 1.0 - sint * sint));
+      float abs_cosi = abs(cosi);
+      
+      float Rs = ((etat * abs_cosi) - (etai * cost)) / ((etat * abs_cosi) + (etai * cost));
+      float Rp = ((etai * abs_cosi) - (etat * cost)) / ((etai * abs_cosi) + (etat * cost));
+      
+      return (Rs * Rs + Rp * Rp) / 2.0;
+    }
+  }
+
+  vec3 sampleSky(vec3 dir) {
+    float t = 0.5 * (dir.y + 1.0);
+    vec3 skyColor = mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t);
+    float sun = pow(max(0.0, dot(dir, normalize(vec3(1.0, 1.0, 1.0)))), mix(64.0, 2.0, sqrt(u_roughness)));
+    return skyColor + sun * 3.0;
+  }
+
   vec3 getNormal(vec2 uv) {
     vec3 tangentNormal = texture(u_normalTex, uv).xyz * 2.0 - 1.0;
-
     vec3 q1 = dFdx(v_worldPos);
     vec3 q2 = dFdy(v_worldPos);
     vec2 st1 = dFdx(uv);
     vec2 st2 = dFdy(uv);
-
     vec3 N = normalize(v_norm);
     vec3 T = normalize(q1 * st2.t - q2 * st1.t);
     vec3 B = -normalize(cross(N, T));
-    mat3 TBN = mat3(T, B, N);
-
-    return normalize(TBN * tangentNormal);
+    return normalize(mat3(T, B, N) * tangentNormal);
   }
 
   void main() {
-    vec2 uv = vec2(v_uv.x,1.0-v_uv.y);
-    vec4 texColor = u_hasAlbedo ? texture(u_albedoTex, uv) : vec4(1.0);
-    
-    if(u_mode == 0) { 
-      // Use perturbed normal if map exists, otherwise use vertex normal
-      vec3 n = u_hasNormal ? getNormal(uv) : normalize(v_norm); 
-      
-      float light = max(dot(n, normalize(vec3(1,2,3))), 0.4);
-      vec4 diffuse = vec4(u_color.rgb * texColor.rgb * light, u_color.a * texColor.a); 
-      outColor = diffuse + vec4(u_emittance,0.);
-    } else {
+    if (u_mode == 1) {
       outColor = u_color;
+      return;
     }
-  }`;
 
-const sh = (t, s) => { const x = gl.createShader(t); gl.shaderSource(x, s); gl.compileShader(x); gl.attachShader(prog, x); };
-sh(gl.VERTEX_SHADER, vs); sh(gl.FRAGMENT_SHADER, fs); gl.linkProgram(prog);
+    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+    vec3 N = u_hasNormal ? getNormal(uv) : normalize(v_norm);
+    vec3 V = normalize(v_viewDir);
+    vec3 R = reflect(-V, N);
+    
+    vec3 albedo = u_color.rgb;
+    if(u_hasAlbedo) albedo *= texture(u_albedoTex, uv).rgb;
+
+    float F = 0.;
+    if (u_type == 2) {
+      // Use full Fresnel instead of Schlick
+      F = fresnel(-V, dot(N, V) > 0. ? N : -N, 1.0, u_ior);
+    } else {
+      float cosTheta = abs(dot(N, V));
+      // Fresnel Schlick
+      float F0 = abs((1.0 - u_ior) / (1.0 + u_ior));
+      F0 = F0 * F0;
+      F = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+    }
+
+    vec3 finalColor = vec3(0.0);
+    float alpha = u_color.a;
+
+    if (u_type == 2) { // GLASS
+      // Beer's Law Thickness Proxy
+      float thickness = max(0.0, dot(N, V)) * 2.0;
+      vec3 sigma = -log(max(albedo, vec3(0.01))) * u_concentration;
+      vec3 transmissionFactor = exp(-sigma * thickness);
+      
+      // Separate Transmission and Reflection
+      vec3 refractDir = refract(-V, N, 1.0 / u_ior);
+      vec3 transmission = sampleSky(refractDir) * transmissionFactor;
+      vec3 reflection = sampleSky(R);
+      
+      // Combine based on Fresnel
+      finalColor = mix(transmission, reflection, F);
+
+      // Alpha depends on internal absorption + surface reflection
+      float avgTrans = (transmissionFactor.r + transmissionFactor.g + transmissionFactor.b) / 3.0;
+      alpha = mix(1.0 - avgTrans, 1.0, F);
+
+      // Add Additive Specular (so highlights don't vanish)
+      float spec = pow(max(0.0, dot(R, normalize(vec3(1.0, 1.0, 1.0)))), mix(64.0, 2.0, sqrt(u_roughness)));
+      alpha += spec;
+    } 
+    else if (u_type == 1) { // METAL
+      finalColor = sampleSky(R) * albedo;
+    } 
+    else { // OPAQUE / PLASTIC
+      float diffuseInt = max(0.0, dot(N, normalize(vec3(1, 2, 3))));
+      vec3 diffuse = albedo * (diffuseInt + 0.05);
+      finalColor = mix(diffuse, sampleSky(R), F * (1.0 - u_roughness));
+      float spec = pow(max(0.0, dot(R, normalize(vec3(1.0, 1.0, 1.0)))), mix(64.0, 2.0, sqrt(u_roughness)));
+      finalColor += spec;
+    }
+
+    finalColor += u_emittance;
+
+    // Tone Map & Gamma
+    finalColor = finalColor / (finalColor + vec3(1.0));
+    finalColor = pow(finalColor, vec3(1.0/2.2));
+
+    outColor = vec4(finalColor, alpha);
+  }
+`;
+
+function createShaderProgram(gl, vsSource, fsSource) {
+  const compileShader = (type, source) => {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      const typeName = type === gl.VERTEX_SHADER ? "VERTEX" : "FRAGMENT";
+      console.error(`GLSL ${typeName} SHADER ERROR:`, gl.getShaderInfoLog(shader));
+      gl.deleteShader(shader);
+      return null;
+    }
+    return shader;
+  };
+
+  const vs = compileShader(gl.VERTEX_SHADER, vsSource);
+  const fs = compileShader(gl.FRAGMENT_SHADER, fsSource);
+  
+  if (!vs || !fs) return null;
+
+  const program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error("GLSL PROGRAM LINK ERROR:", gl.getProgramInfoLog(program));
+    return null;
+  }
+  return program;
+}
+const prog = createShaderProgram(gl,vs,fs);
 const locs = {
-  mvp: gl.getUniformLocation(prog, "u_mvp"), 
-  model: gl.getUniformLocation(prog, "u_model"), 
-  color: gl.getUniformLocation(prog, "u_color"), 
-  emittance: gl.getUniformLocation(prog, "u_emittance"), 
+  mvp: gl.getUniformLocation(prog, "u_mvp"),
+  model: gl.getUniformLocation(prog, "u_model"),
   mode: gl.getUniformLocation(prog, "u_mode"),
+  color: gl.getUniformLocation(prog, "u_color"),
+  emittance: gl.getUniformLocation(prog, "u_emittance"),
+  type: gl.getUniformLocation(prog, "u_type"),
+  roughness: gl.getUniformLocation(prog, "u_roughness"),
+  ior: gl.getUniformLocation(prog, "u_ior"),
+  concentration: gl.getUniformLocation(prog, "u_concentration"),
+  camPos: gl.getUniformLocation(prog, "u_camPos"),
   hasAlbedo: gl.getUniformLocation(prog, "u_hasAlbedo"),
   hasNormal: gl.getUniformLocation(prog, "u_hasNormal"),
   albedoTex: gl.getUniformLocation(prog, "u_albedoTex"),
@@ -346,36 +476,33 @@ const locs = {
 };
 
 function setMaterialUniforms(mat) {
-  function uniformTexture(texloc,hastexloc,tex,index) {
-    let hasTexture = false;
-    if (tex) {
-      if (!tex.glTexture && tex.image.complete) {
-        window.uploadTextureToGPU(tex);
-      }
-      if (tex.glTexture) {
-        gl.activeTexture(gl["TEXTURE"+index]);
-        gl.bindTexture(gl.TEXTURE_2D, tex.glTexture);
-        gl.uniform1i(texloc, index);
-        hasTexture = true;
-      }
+  if (!mat) return;
+
+  // 1. Texture Slots
+  const bindTex = (loc, hasLoc, tex, unit) => {
+    let active = false;
+    if (tex && tex.glTexture) {
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, tex.glTexture);
+      gl.uniform1i(loc, unit);
+      active = true;
     }
-    gl.uniform1i(hastexloc, hasTexture ? 1 : 0);
-  }
+    gl.uniform1i(hasLoc, active ? 1 : 0);
+  };
 
-  // Albedo Texture
-  if (mat) uniformTexture(locs.albedoTex,locs.hasAlbedo,mat.albedoTex,0)
-  else gl.uniform1i(locs.hasAlbedo, 0);
+  bindTex(locs.albedoTex, locs.hasAlbedo, mat.albedoTex, 0);
+  bindTex(locs.normalTex, locs.hasNormal, mat.normalTex, 1);
 
-  if (mat) uniformTexture(locs.normalTex,locs.hasNormal,mat.normalTex,1)
-  else gl.uniform1i(locs.hasNormal, 0);
-
-  let color = [0.8,0.8,0.8,1.0];
-  if (mat) color = [...mat.color, 1];
-  gl.uniform4fv(locs.color, color);
-
-  let emittance = [0,0,0];
-  if (mat) emittance = mat.emittance.map(v=>v*mat.emissionIntensity);
-  gl.uniform3fv(locs.emittance, emittance);
+  // 2. Physical Properties
+  gl.uniform4fv(locs.color, [...(mat.color || [0.8, 0.8, 0.8]), 1.0]);
+  gl.uniform3fv(locs.emittance, (mat.emittance || [0,0,0]).map(v => v * (mat.emissionIntensity || 0)));
+  
+  // Mapping raytracer types to shader ints
+  // 0: Opaque, 1: Metal, 2: Dielectric
+  gl.uniform1i(locs.type, mat.type || 0);
+  gl.uniform1f(locs.roughness, mat.roughness || 0.0);
+  gl.uniform1f(locs.ior, mat.ior || 1.45);
+  gl.uniform1f(locs.concentration, mat.concentration || 1);
 }
 
 // Modified slightly to return buffers so we can delete them later
@@ -452,6 +579,75 @@ const gridGeo = (() => {
   return window.createVAOWithBuffers(p, n, i);
 })();
 
+function drawScene(objects,vp) {
+  var drawObject = (n)=>{
+    n.updateMatrix(); const mvp = mat4.mul(mat4.create(), vp, n.matrix);
+    gl.uniformMatrix4fv(locs.mvp, false, mvp); gl.uniformMatrix4fv(locs.model, false, n.matrix);
+    
+    // Draw Dynamic Node Geometry
+    if (!n.vaoData) n.updateGeo(); 
+    gl.bindVertexArray(n.vaoData.vao);
+    gl.uniform1i(locs.mode, 0);
+
+    setMaterialUniforms(n.material);
+
+    gl.uniform3fv(locs.camPos, Cam.position);
+
+    gl.drawElements(gl.TRIANGLES, n.vaoData.count, gl.UNSIGNED_INT, 0);
+  };
+
+  const opaques = [];
+  const transparents = [];
+
+  // 1. Bucket objects by material type
+  objects.forEach(obj => {
+    // material_type 2 is Dielectric (Glass)
+    const isTransparent = obj.material.type === 2;
+    if (isTransparent) {
+      // Calculate distance for sorting
+      // We use squared distance to avoid expensive Math.sqrt calls
+      const dx = obj.position[0] - Cam.position[0];
+      const dy = obj.position[1] - Cam.position[1];
+      const dz = obj.position[2] - Cam.position[2];
+      obj._distSq = dx * dx + dy * dy + dz * dz;
+      transparents.push(obj);
+    } else {
+      opaques.push(obj);
+    }
+  });
+
+  // 2. Prepare GL State
+  //gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+  gl.disable(gl.CULL_FACE);
+
+  // --- PASS 1: OPAQUE ---
+  // Draw opaque objects with depth writing enabled
+  gl.disable(gl.BLEND);
+  gl.depthMask(true); 
+  
+  opaques.forEach(obj => {
+    drawObject(obj); 
+  });
+
+  // --- PASS 2: TRANSPARENT ---
+  // Sort Back-to-Front (highest distance first)
+  transparents.sort((a, b) => b._distSq - a._distSq);
+
+  // Enable blending for transparency
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.disable(gl.CULL_FACE);
+  
+  // CRITICAL: Disable depth writing so transparent objects don't 
+  // occlude things behind them, but they still respect the Opaque depth buffer.
+  gl.depthMask(false);
+
+  transparents.forEach(obj => {
+    drawObject(obj);
+  });
+}
+
 function draw() {
   const w = gl_canvas.parentElement.clientWidth, h = gl_canvas.parentElement.clientHeight;
   if(gl_canvas.width!==w || gl_canvas.height!==h) { gl_canvas.width=w; gl_canvas.height=h; }
@@ -464,34 +660,9 @@ function draw() {
   gl.uniform1i(locs.mode, 1); gl.uniform4f(locs.color, 0.2, 0.2, 0.2, 1);
   gl.bindVertexArray(gridGeo.vao); gl.drawElements(gl.LINES, gridGeo.count, gl.UNSIGNED_INT, 0);
 
-  State.nodes.forEach(n => {
-    n.updateMatrix(); const mvp = mat4.mul(mat4.create(), vp, n.matrix);
-    gl.uniformMatrix4fv(locs.mvp, false, mvp); gl.uniformMatrix4fv(locs.model, false, n.matrix);
-    
-    // Draw Dynamic Node Geometry
-    if (!n.vaoData) n.updateGeo(); 
-    gl.bindVertexArray(n.vaoData.vao);
-    gl.uniform1i(locs.mode, 0);
+  drawScene(State.nodes,vp);
 
-    setMaterialUniforms(n.material);
-
-    gl.drawElements(gl.TRIANGLES, n.vaoData.count, gl.UNSIGNED_INT, 0);
-    
-    // Draw Selection Highlight (Using the scalable wireframe box)
-    // if(State.selected?.id === n.id) {
-    //   var bounds = n.getBounds();
-    //   var selmat = mat4.create();
-    //   mat4.translate(selmat, selmat, [0,1,2].map(i=>(bounds.max[i]+bounds.min[i])/2+0.001));
-    //   mat4.scale(selmat, selmat, [0,1,2].map(i=>bounds.max[i]-bounds.min[i]));
-    //   n.updateMatrix(); const mvp = mat4.mul(mat4.create(), vp, selmat);
-    //   gl.uniformMatrix4fv(locs.mvp, false, mvp); gl.uniformMatrix4fv(locs.model, false, selmat);
-    //   gl.uniform1i(locs.mode, 1); gl.uniform4f(locs.color, 1, 1, 1, 1);
-      
-    //   // For models and complex objects, highlighting the AABB bounds is usually best
-    //   gl.bindVertexArray(lineCubeGeo.vao); 
-    //   gl.drawElements(gl.LINES, lineCubeGeo.count, gl.UNSIGNED_INT, 0);
-    // }
-  });
+  gl.depthMask(true); 
 
   if (State.selected) {
     const n = State.selected;
@@ -645,7 +816,10 @@ function generatePreview(callback,size) {
 
   return canvas2d.toDataURL("image/png");
 }
-function generateMaterialPreview(material, size = 256) { 
+function generateMaterialPreview(material, size = 256) {
+  gl.enable(gl.CULL_FACE);
+  gl.disable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   const url = generatePreview(function(){
     // 2. Setup Scene Matrices
     const projection = mat4.perspective(mat4.create(), 0.6, 1, 0.1, 10);
@@ -664,6 +838,8 @@ function generateMaterialPreview(material, size = 256) {
       gl.uniform1i(locs.mode, 0);
       
       setMaterialUniforms(material);
+
+      gl.uniform3fv(locs.camPos, [0, 0, 4]);
 
       gl.drawElements(gl.TRIANGLES, sphereGeo.count, gl.UNSIGNED_INT, 0);
     }
@@ -694,6 +870,9 @@ function generateModelPreview(modeldata, size = 256) {
     const mvp = mat4.multiply(mat4.create(), projection, view);
     const model = mat4.create();
 
+    gl.enable(gl.CULL_FACE);
+    gl.disable(gl.BLEND);
+
     // Use the global program and sphere geometry
     if (prog && modelObj.vaoData) {
       gl.useProgram(prog);
@@ -706,6 +885,8 @@ function generateModelPreview(modeldata, size = 256) {
       
       setMaterialUniforms(modelObj.material);
 
+      gl.uniform3fv(locs.camPos, camPos);
+
       gl.drawElements(gl.TRIANGLES, modelObj.vaoData.count, gl.UNSIGNED_INT, 0);
     }
   },size);
@@ -716,7 +897,7 @@ function generateModelPreview(modeldata, size = 256) {
 
 const renderPreview = (a, size) => {
   if (a instanceof Texture) return a.url;
-  if (a instanceof HDRTexture) return a.generateThumbnail(size);
+  if (a instanceof HDRTexture) return a.generateThumbnail(size*2);
   if (a instanceof Material) return a.urlData ? a.urlData : generateMaterialPreview(a,size);
   if (a instanceof ModelData) return a.previewUrl ? a.previewUrl : generateModelPreview(a,size);
 }
