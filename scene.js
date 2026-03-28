@@ -391,6 +391,7 @@ var SceneList = [
       var bunnyModel = new ModelData('Bunny').loadOBJ('assets/bunny/model.obj');
       var bunnyColor = new Texture('assets/bunny/color.jpg','Bunny Color');
       var bunnyNormal = new Texture('assets/bunny/normal.png', 'Bunny Normals');
+      var bunnyRoughness = new Texture('assets/bunny/roughness.jpeg', 'Bunny Roughness');
 
       scene.background = new HDRTexture('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/venice_sunset_2k.hdr');
       
@@ -401,6 +402,7 @@ var SceneList = [
         bunnyModel.loaded,
         bunnyColor.loaded,
         bunnyNormal.loaded,
+        bunnyRoughness.loaded,
         scene.background.loaded
       ]);
       bunnyModel.renormalize();
@@ -427,6 +429,7 @@ var SceneList = [
       var bunnyMaterial = new Material("Bunny Material",0,[1.0, 1.0, 1.0], 0.5, [0, 0, 0], {
         albedoTex: bunnyColor,
         normalTex: bunnyNormal,
+        roughnessTex: bunnyRoughness,
         uvScale: [1.0, -1.0],
       });
 
@@ -464,6 +467,7 @@ async function loadScene() {
   var scene = await SceneList[SelectedScene].create(canvas);
   document.getElementById('render-w').value = canvas.width;
   document.getElementById('render-h').value = canvas.height;
+  document.getElementById('render-bounces').value = scene.bounces;
   State.scene = scene;
   Cam.updateOrbit(scene.camera.position,scene.camera.target);
   State.nodes = scene.objects;
