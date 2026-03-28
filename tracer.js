@@ -145,7 +145,7 @@ Material.getSchema = function(m) {
   var ior = m.ior;
   if (m.type == 0) ior = ((ior-1)/(ior+1)) ** 2;
   return [
-    {type: "vec3f", data: m.color},
+    {type: "vec3f", data: m.color.map(v=>Math.pow(v,2.2))},
     {type: "f32", data: m.roughness},
     {type: "vec3f", data: m.emittance?m.emittance.map(v=>v*m.emissionIntensity):[0,0,0]},
     {type: "i32", data: m.type},
