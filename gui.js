@@ -53,7 +53,7 @@ function createCheckerboardDataURL(size = 256, squares = 8, color1 = '#ffffff', 
   return canvas.toDataURL();
 }
 
-const defaultMaterial = new Material("Default Material",0,[0.8,0.8,0.8],0.5,[0,0,0,0]);
+const defaultMaterial = new Material("Default Material",0,[1,1,1],1,[0,0,0]);
 defaultMaterial.name = "Default Material";
 defaultMaterial.albedoTex = new Texture(createCheckerboardDataURL(64,2,"#ff00ff","#000"), "Checkerboard");
 var renderCanvas = document.createElement('canvas');
@@ -308,8 +308,11 @@ const fs = `#version 300 es
   
   uniform sampler2D u_albedoTex;
   uniform sampler2D u_normalTex;
+  uniform sampler2D u_roughnessTex;
   uniform bool u_hasAlbedo;
   uniform bool u_hasNormal;
+  uniform bool u_hasRoughness;
+  uniform vec2 u_uvScale; 
 
   out vec4 outColor;
 
@@ -339,10 +342,10 @@ const fs = `#version 300 es
     }
   }
 
-  vec3 sampleSky(vec3 dir) {
+  vec3 sampleSky(vec3 dir, float roughness) {
     float t = 0.5 * (dir.y + 1.0);
     vec3 skyColor = mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t);
-    float sun = pow(max(0.0, dot(dir, normalize(vec3(1.0, 1.0, 1.0)))), mix(64.0, 2.0, sqrt(u_roughness)));
+    float sun = pow(max(0.0, dot(dir, normalize(vec3(1.0, 1.0, 1.0)))), mix(64.0, 2.0, sqrt(roughness)));
     return skyColor + sun * 3.0;
   }
 
@@ -364,13 +367,16 @@ const fs = `#version 300 es
       return;
     }
 
-    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+    vec2 uv = v_uv * u_uvScale;
     vec3 N = u_hasNormal ? getNormal(uv) : normalize(v_norm);
     vec3 V = normalize(v_viewDir);
     vec3 R = reflect(-V, N);
     
-    vec3 albedo = u_color.rgb;
-    if(u_hasAlbedo) albedo *= texture(u_albedoTex, uv).rgb;
+    vec3 albedo = pow(u_color.rgb, vec3(2.2));
+    if (u_hasAlbedo) albedo *= pow(texture(u_albedoTex, uv).rgb, vec3(2.2));
+
+    float roughness = u_roughness;
+    if (u_hasRoughness) roughness *= texture(u_roughnessTex, uv).r;
 
     float F = 0.;
     if (u_type == 2) {
@@ -395,8 +401,8 @@ const fs = `#version 300 es
       
       // Separate Transmission and Reflection
       vec3 refractDir = refract(-V, N, 1.0 / u_ior);
-      vec3 transmission = sampleSky(refractDir) * transmissionFactor;
-      vec3 reflection = sampleSky(R);
+      vec3 transmission = sampleSky(refractDir,roughness) * transmissionFactor;
+      vec3 reflection = sampleSky(R,roughness);
       
       // Combine based on Fresnel
       finalColor = mix(transmission, reflection, F);
@@ -406,18 +412,18 @@ const fs = `#version 300 es
       alpha = mix(1.0 - avgTrans, 1.0, F);
 
       // Add Additive Specular (so highlights don't vanish)
-      float spec = pow(max(0.0, dot(R, normalize(vec3(1.0, 1.0, 1.0)))), mix(64.0, 2.0, sqrt(u_roughness)));
+      float spec = pow(max(0.0, dot(R, normalize(vec3(1.0, 1.0, 1.0)))), mix(64.0, 2.0, sqrt(roughness)));
       alpha += spec;
     } 
     else if (u_type == 1) { // METAL
-      finalColor = sampleSky(R) * albedo;
+      finalColor = sampleSky(R,roughness) * albedo;
     } 
     else { // OPAQUE / PLASTIC
       float diffuseInt = max(0.0, dot(N, normalize(vec3(1, 2, 3))));
       vec3 diffuse = albedo * (diffuseInt + 0.05);
-      finalColor = mix(diffuse, sampleSky(R), F * (1.0 - u_roughness));
-      float spec = pow(max(0.0, dot(R, normalize(vec3(1.0, 1.0, 1.0)))), mix(64.0, 2.0, sqrt(u_roughness)));
-      finalColor += mix(vec3(1), albedo, u_roughness) * spec;
+      finalColor = mix(diffuse, sampleSky(R,roughness), F * (1.0 - roughness));
+      float spec = pow(max(0.0, dot(R, normalize(vec3(1.0, 1.0, 1.0)))), mix(64.0, 2.0, sqrt(roughness)));
+      finalColor += mix(vec3(1), albedo, roughness) * spec;
     }
 
     finalColor += u_emittance;
@@ -475,8 +481,11 @@ const locs = {
   camPos: gl.getUniformLocation(prog, "u_camPos"),
   hasAlbedo: gl.getUniformLocation(prog, "u_hasAlbedo"),
   hasNormal: gl.getUniformLocation(prog, "u_hasNormal"),
+  hasRoughness: gl.getUniformLocation(prog, "u_hasRoughness"),
   albedoTex: gl.getUniformLocation(prog, "u_albedoTex"),
-  normalTex: gl.getUniformLocation(prog, "u_normalTex")
+  normalTex: gl.getUniformLocation(prog, "u_normalTex"),
+  roughnessTex: gl.getUniformLocation(prog, "u_roughnessTex"),
+  uvScale: gl.getUniformLocation(prog, "u_uvScale")
 };
 
 function setMaterialUniforms(mat) {
@@ -497,6 +506,8 @@ function setMaterialUniforms(mat) {
 
   bindTex(locs.albedoTex, locs.hasAlbedo, mat.albedoTex, 0);
   bindTex(locs.normalTex, locs.hasNormal, mat.normalTex, 1);
+  bindTex(locs.roughnessTex, locs.hasRoughness, mat.roughnessTex, 2);
+  gl.uniform2fv(locs.uvScale, mat.uvScale);
 
   // 2. Physical Properties
   gl.uniform4fv(locs.color, [...(mat.color || [0.8, 0.8, 0.8]), 1.0]);
@@ -1037,14 +1048,30 @@ const renderInspector = () => {
       gui.add(a, 'emissionIntensity').name('Emission Intensity').onChange(updateMat);
       gui.add(a, 'ior').name('Index of Refraction').onChange(updateMat);
       gui.add(a, 'concentration').name('Concentration').onChange(updateMat);
-      const t = gui.addFolder('Albedo Texture');
-      var aslot = createAssetSlot(t, "Drop Texture Here", Texture, a, 'albedoTex').onChange(updateMat);
+
+      const tp = gui.addFolder('Texture Parameters');
+      tp.add(a.uvScale,'0').name("UV Scale X").onChange(updateMat);
+      tp.add(a.uvScale,'1').name("UV Scale Y").onChange(updateMat);
+
+      const at = gui.addFolder('Albedo Texture');
+      var aslot = createAssetSlot(at, "Drop Texture Here", Texture, a, 'albedoTex').onChange(updateMat);
       a.removeAlbedoTex = ()=>{ a.albedoTex = null; aslot.textContent = "Drop Texture Here"; }
-      t.add(a, 'removeAlbedoTex').name('Remove Texture').onChange(updateMat);
+      at.add(a, 'removeAlbedoTex').name('Remove Texture').onChange(updateMat);
+
       const nt = gui.addFolder('Normal Texture');
       var nslot = createAssetSlot(nt, "Drop Texture Here", Texture, a, 'normalTex').onChange(updateMat);
       a.removeNormalTex = ()=>{ a.normalTex = null; nslot.textContent = "Drop Texture Here"; }
       nt.add(a, 'removeNormalTex').name('Remove Texture').onChange(updateMat);
+
+      const ht = gui.addFolder('Height Map');
+      var hslot = createAssetSlot(ht, "Drop Texture Here", Texture, a, 'heightTex');
+      a.removeHeightTex = ()=>{ a.heightTex = null; hslot.textContent = "Drop Texture Here"; }
+      ht.add(a, 'removeHeightTex').name('Remove Texture');
+
+      const rt = gui.addFolder('Roughness Texture');
+      var rslot = createAssetSlot(rt, "Drop Texture Here", Texture, a, 'roughnessTex').onChange(updateMat);
+      a.removeRoughnessTex = ()=>{ a.roughnessTex = null; rslot.textContent = "Drop Texture Here"; }
+      rt.add(a, 'removeRoughnessTex').name('Remove Texture').onChange(updateMat);
     }
   }
 };
