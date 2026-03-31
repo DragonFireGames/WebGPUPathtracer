@@ -159,18 +159,6 @@ const AnimationPanel = {
     }
   },
 
-  lerp(a, b, t) {
-    return a + (b - a) * t;
-  },
-
-  interpolateVector(v1, v2, t) {
-    return [
-      this.lerp(v1[0], v2[0], t),
-      this.lerp(v1[1], v2[1], t),
-      this.lerp(v1[2], v2[2], t),
-    ];
-  },
-
   updateAnimatedEntities() {
     // For each animated item, find keyframes and interpolate
     for (const [nodeId, keyframes] of this.keyframes.entries()) {
@@ -180,8 +168,7 @@ const AnimationPanel = {
       if (!node) continue;
 
       // Find the keyframes to interpolate between
-      let kf1 = null,
-        kf2 = null;
+      let kf1 = null, kf2 = null;
       for (let i = 0; i < keyframes.length; i++) {
         if (keyframes[i].time <= this.currentTime) {
           kf1 = keyframes[i];
@@ -190,20 +177,15 @@ const AnimationPanel = {
           kf2 = keyframes[i];
         }
       }
-
       if (kf1 && kf2 && kf1 !== kf2) {
         // Interpolate between keyframes with easing
         let t = (this.currentTime - kf1.time) / (kf2.time - kf1.time);
         t = this.applyEasing(t, kf1.easing);
-        node.position = this.interpolateVector(
-          kf1.position,
-          kf2.position,
-          t,
-        );
+        vec3.lerp(node.position,kf1.position,kf2.position,t);
         quat.lerp(node.rotation,kf1.rotation,kf2.rotation,t);
         quat.normalize(node.rotation,node.rotation);
-        node.scale = this.interpolateVector(kf1.scale, kf2.scale, t);
-      } else if (kf1 && !kf2) {
+        vec3.lerp(node.scale,kf1.scale,kf2.scale,t);
+      } else if (kf1 && !kf2 || kf1 === kf2) {
         // Use the last keyframe
         node.position = [...kf1.position];
         node.rotation = [...kf1.rotation];
@@ -214,6 +196,7 @@ const AnimationPanel = {
         node.rotation = [...kf2.rotation];
         node.scale = [...kf2.scale];
       }
+      node.updateMatrix();
     }
   },
 
@@ -355,6 +338,100 @@ function setEasing(easing) {
 }
 
 function removeKeyframe() {
-  AnimationPanel.setKeyframeEasing(window.currentKeyframeContext.nodeId, window.currentKeyframeContext.time); 
+  AnimationPanel.removeKeyframe(window.currentKeyframeContext.nodeId, window.currentKeyframeContext.time); 
   document.getElementById('keyframe-context-menu').style.display = 'none';
+}
+
+class PhysicsController {
+  constructor(objects) {
+    var world = this.world = new CANNON.World();
+    world.gravity.set(0, -9.82, 0);
+    world.solver.iterations = 20;
+    world.defaultContactMaterial.contactEquationStiffness = 1e10;
+    world.defaultContactMaterial.contactEquationRelaxation = 10;
+
+    this.bodies = [];
+    for (var i = 0; i < objects.length; i++) {
+      var obj = objects[i];
+      //if (!(obj instanceof TracerObject)) continue;
+      var pos = {x:obj.position[0],y:obj.position[1],z:obj.position[2]};
+      var quat = {x:obj.rotation[0],y:obj.rotation[1],z:obj.rotation[2],w:obj.rotation[3]};
+      var scale = {x:obj.scale[0],y:obj.scale[1],z:obj.scale[2]};
+      
+      var body;
+      var density = 5;
+      if (obj.type == "Sphere") {
+        var radius = scale.x;
+        var shape = new CANNON.Sphere(radius);
+        var volume = 4/3*Math.PI*radius*radius*radius;
+        body = new CANNON.Body({
+          mass: volume * density,
+          shape: shape
+        });
+      } else if (obj.type == "Cube") {
+        var width = scale.x, height = scale.y, depth = scale.z;
+        shape = new CANNON.Box(new CANNON.Vec3(width, height, depth));
+        var volume = width*height*depth;
+        body = new CANNON.Body({
+          mass: volume * density,
+          shape: shape
+        });
+      } else if (obj.type == "Plane") {
+        shape = new CANNON.Plane();
+        body = new CANNON.Body({
+          mass: 0,
+          shape: shape
+        });
+        const { normal } = obj.getOrientation();
+        const q = new CANNON.Quaternion();
+        q.setFromVectors(new CANNON.Vec3(0, 0, 1), new CANNON.Vec3(normal[0], normal[1], normal[2]));
+        quat = q;
+      } else {
+        alert("Physics for "+obj.type+" aren't supported yet.");
+        continue;
+      }
+
+      body.position.set(pos.x, pos.y, pos.z);
+      body.quaternion.set(quat.x, quat.y, quat.z, quat.w);
+
+      world.addBody(body);
+      body.renderer = obj;
+      body.scale = scale;
+      body.initialTransform = { pos, quat };
+      obj.physicsbody = body;
+
+      this.bodies.push(body);
+    }
+  }
+  update(deltaTime) {
+    this.world.step(deltaTime);
+    for (var i = 0; i < this.bodies.length; i++) {
+      var body = this.bodies[i];
+      if (body.mass == 0) continue;
+      var obj = body.renderer;
+      if (obj.type == "Plane") continue;
+      //var T = Wugl.composeTransform3D(body.position, body.quaternion, body.scale); 
+      //if (body.offset) T = T.multiply(Transform.Translation([ -body.offset.x, -body.offset.y, -body.offset.z ])); 
+      //obj.setTransform(T);
+      obj.position = [body.position.x,body.position.y,body.position.z];
+      obj.rotation = [body.quaternion.x,body.quaternion.y,body.quaternion.z,body.quaternion.w];
+      obj.updateMatrix();
+    }
+  }
+  reset() {
+    for (var i = 0; i < this.bodies.length; i++) {
+      var body = this.bodies[i];
+      if (body.mass == 0) continue;
+      var obj = body.renderer;
+      if (obj.type == "Plane") continue;
+      //var T = Wugl.composeTransform3D(body.position, body.quaternion, body.scale); 
+      //if (body.offset) T = T.multiply(Transform.Translation([ -body.offset.x, -body.offset.y, -body.offset.z ])); 
+      //obj.setTransform(T);
+      var ot = body.initialTransform;
+      console.log(ot);
+      obj.position = [ot.pos.x,ot.pos.y,ot.pos.z];
+      obj.rotation = [ot.quat.x,ot.quat.y,ot.quat.z,ot.quat.w];
+      obj.updateMatrix();
+    }
+  }
 }
