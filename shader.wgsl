@@ -2,7 +2,7 @@
 @id(1) override HAS_SPHERES: bool = true;
 @id(2) override HAS_CUBES: bool = true;
 @id(3) override HAS_PLANES: bool = true;
-@id(4) override HAS_FRUSTUMS: bool = true;
+@id(4) override HAS_CYLINDERS: bool = true;
 @id(5) override HAS_TORI: bool = true;
 @id(6) override HAS_MESHES: bool = true;
 @id(7) override HAS_LIST_MESHES: bool = true;
@@ -49,7 +49,7 @@ struct Plane {
   pad0: f32, pad1: f32, pad2: f32
 };
 
-struct Frustum { 
+struct Cylinder { 
   inv_matrix: mat4x4f,
   material_idx: i32,
   top_radius: f32,
@@ -302,11 +302,11 @@ fn hit_plane(normal: vec3f, d: f32, r: Ray) -> f32 {
   return -1.0;
 }
 
-fn hit_frustum(r: Ray, r0: f32, r1: f32, t_out: ptr<function, f32>, n_out: ptr<function, vec3f>, uv_out: ptr<function, vec2f>) -> bool {
+fn hit_cylinder(r: Ray, r0: f32, r1: f32, t_out: ptr<function, f32>, n_out: ptr<function, vec3f>, uv_out: ptr<function, vec2f>) -> bool {
   let h = 1.0;
   let dr = r1 - r0;
   
-  // Quadratic coefficients for a cone/frustum side
+  // Quadratic coefficients for a cone/cylinder side
   let k = dr / h;
   let origin_eff_radius = r0 + k * r.origin.y;
   
@@ -544,13 +544,13 @@ fn trace_plane(ray_world: Ray, p: Plane, hit: ptr<function, SurfaceHit>) {
   }
 }
 
-fn trace_frustum(ray_world: Ray, f: Frustum, hit: ptr<function, SurfaceHit>) {
+fn trace_cylinder(ray_world: Ray, f: Cylinder, hit: ptr<function, SurfaceHit>) {
   var local_ray: Ray;
   local_ray.origin = (f.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
   local_ray.direction = (f.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
 
   var t: f32; var n: vec3f; var uv: vec2f;
-  if (hit_frustum(local_ray, 1.0, f.top_radius, &t, &n, &uv)) {
+  if (hit_cylinder(local_ray, 1.0, f.top_radius, &t, &n, &uv)) {
     if (t < (*hit).t) {
       (*hit).t = t;
       (*hit).m_idx = f.material_idx;
@@ -631,9 +631,9 @@ fn trace_tlas(ray: Ray, hit: ptr<function, SurfaceHit>) {
           trace_sphere(ray, obj, hit);
         } else if (HAS_CUBES && otype == 2) { 
           trace_cube(ray, obj, hit);
-        } else if (HAS_FRUSTUMS && otype == 3) { 
-          let frustum = Frustum(obj.inv_matrix,obj.material_idx,obj.pad0);
-          trace_frustum(ray, frustum, hit);
+        } else if (HAS_CYLINDERS && otype == 3) { 
+          let cylinder = Cylinder(obj.inv_matrix,obj.material_idx,obj.pad0);
+          trace_cylinder(ray, cylinder, hit);
         } else if (HAS_TORI && otype == 4) {
           let torus = Torus(obj.inv_matrix,obj.material_idx,obj.pad0);
           trace_torus(ray, torus, hit);
@@ -665,7 +665,7 @@ fn trace_scene(ray: Ray) -> SurfaceHit {
     }
   }
 
-  if (HAS_SPHERES || HAS_CUBES || HAS_FRUSTUMS || HAS_TORI || HAS_MESHES) {
+  if (HAS_SPHERES || HAS_CUBES || HAS_CYLINDERS || HAS_TORI || HAS_MESHES) {
     trace_tlas(ray, &hit);
   }
 
