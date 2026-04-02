@@ -138,7 +138,7 @@ class Material {
     // Physics
     this.density = options.density || 5;
     this.friction = options.friction !== undefined ? options.friction : 0.5;
-    this.restitution = options.restitution !== undefined ? options.restitution : 0.3; // Bounciness
+    this.restitution = options.restitution !== undefined ? options.restitution : 0;
   }
 }
 Material.getSchema = function(m) {
@@ -1764,9 +1764,8 @@ class Renderer {
       plane: makeBuf(sceneData.plane.data, sceneData.plane.size)
     };
 
-    const uBuf = this.uBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const aBuf = device.createBuffer({ size: canvas.width * canvas.height * 16, usage: GPUBufferUsage.STORAGE });
-
+    this.uBuf = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    
     console.log("Created Buffers");
 
     const wgslCode = await loadText('shader.wgsl');
@@ -1789,7 +1788,7 @@ class Renderer {
 
     const f = sceneData.flags;
 
-    const pipe = this.pipe = device.createComputePipeline({ 
+    this.pipe = device.createComputePipeline({ 
       layout: 'auto', 
       compute: { 
         module: shaderModule, 
@@ -1806,43 +1805,45 @@ class Renderer {
           8: f.hasHeightMaps ? 1 : 0,
           9: f.hasSkybox ? 1 : 0,
         }
-      } 
+      }
     });
 
     console.log("Pipeline Created");
     
-    const tex = this.tex = device.createTexture({ 
-      size: [canvas.width, canvas.height], 
-      format: 'rgba8unorm', 
-      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC 
-    });
-
-    this.bG = device.createBindGroup({ 
-      layout: pipe.getBindGroupLayout(0), 
-      entries: [
-        { binding: 0, resource: { buffer: uBuf } }, 
-        { binding: 1, resource: { buffer: aBuf } },
-        { binding: 2, resource: tex.createView() },
-        { binding: 3, resource: { buffer: this.buffers.mat } },
-        { binding: 4, resource: { buffer: this.buffers.object } }, 
-        { binding: 5, resource: { buffer: this.buffers.tlas } },
-        { binding: 6, resource: { buffer: this.buffers.mesh } },
-        { binding: 7, resource: { buffer: this.buffers.bvh } },
-        { binding: 8, resource: { buffer: this.buffers.triangle } },
-        { binding: 9, resource: { buffer: this.buffers.plane } },
-        // Expanded Texture Bindings
-        ...gpuTextures.map((t, i) => ({ binding: 10 + i, resource: t.createView() })),
-        { binding: 18, resource: sampler },
-        //
-        { binding: 19, resource: hdrTextureView },
-        { binding: 20, resource: skySampler }
-      ]
-    });
+    this.gpuTextures = gpuTextures;
+    this.sampler = sampler;
+    this.hdrTextureView = hdrTextureView;
+    this.skySampler = skySampler;
+    this.resize();
 
     console.log("Bindings Created");
 
     this.reset();
     console.log("Scene loaded!");
+  }
+
+  createBindGroup() {
+    this.bG = this.device.createBindGroup({
+      layout: this.pipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uBuf } },
+        { binding: 1, resource: { buffer: this.aBuf } },
+        { binding: 2, resource: this.tex.createView() },
+        { binding: 3, resource: { buffer: this.buffers.mat } },
+        { binding: 4, resource: { buffer: this.buffers.object } },
+        { binding: 5, resource: { buffer: this.buffers.tlas } },
+        { binding: 6, resource: { buffer: this.buffers.mesh } },
+        { binding: 7, resource: { buffer: this.buffers.bvh } },
+        { binding: 8, resource: { buffer: this.buffers.triangle } },
+        { binding: 9, resource: { buffer: this.buffers.plane } },
+        // Map existing GPU textures (Up to 8)
+        ...this.gpuTextures.map((t, i) => ({ binding: 10 + i, resource: t.createView() })),
+        { binding: 18, resource: this.sampler },
+        { binding: 19, resource: this.hdrTextureView },
+        { binding: 20, resource: this.skySampler }
+      ]
+    });
+    return this.bG;
   }
 
   async updateObjects() {
@@ -1879,19 +1880,58 @@ class Renderer {
     }
   }
 
+  resize() {
+    if (!this.device || !this.scene) return;
+
+    var width = this.canvas.width;
+    var height = this.canvas.height;
+
+    // 3. Recreate the Storage Texture (The one the shader writes to)
+    if (this.tex) this.tex.destroy();
+    this.tex = this.device.createTexture({
+      size: [width, height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT
+    });
+
+    // 4. Recreate the Accumulation Buffer (The 16-byte-per-pixel float buffer)
+    // This is where the raw light data is summed up (4 floats per pixel)
+    if (this.aBuf) this.aBuf.destroy();
+    this.aBuf = this.device.createBuffer({
+      size: width * height * 16, 
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+
+    // 5. Update the Bind Group
+    // Since the texture view and buffer reference changed, we must rebuild the Bind Group
+    // We reuse the existing pipeline layout.
+    this.createBindGroup();
+
+    // 6. Reset the frame counter so accumulation starts over
+    this.reset();
+    
+    console.log(`Resized to ${width}x${height}`);
+  }
+
   updateUniforms() {
     const { canvas, device, uBuf } = this;
 
     const cam = this.scene.camera;
     cam.updateRays2();
-    const uData = new Float32Array(24);
-    new Uint32Array(uData.buffer).set([this.frame, canvas.width, canvas.height]);
-    uData.set([cam.exposure], 3);
-    uData.set([...cam.jitteredPosition, 0], 4); 
-    uData.set([...cam.ray00, 0], 8); 
-    uData.set([...cam.ray10, 0], 12);
-    uData.set([...cam.ray01, 0], 16); 
-    uData.set([...cam.ray11, 0], 20);
+    var randomSeed = Math.floor(Math.random() * 0xFFFFFFFF);
+    const uData = new Float32Array(20);
+    const uView = new DataView(uData.buffer);
+    uData.set(cam.jitteredPosition, 0);
+    uView.setUint32(3*4, this.frame, true);
+    uData.set(cam.ray00, 4); 
+    uView.setUint32(7*4, canvas.width, true);
+    uData.set(cam.ray10, 8);
+    uView.setUint32(11*4, canvas.height, true);
+    uData.set(cam.ray01, 12); 
+    uView.setFloat32(15*4, cam.exposure, true);
+    uData.set(cam.ray11, 16);
+    uView.setUint32(19*4, randomSeed, true);
+
     device.queue.writeBuffer(uBuf, 0, uData);
   }
   
