@@ -501,12 +501,38 @@ class ConvexCollider {
 }
 
 class PhysicsController {
-  constructor(objects) {
+  constructor(scene) {
+    const objects = scene.objects;
+    const materials = scene.getMaterials();
+
     var world = this.world = new CANNON.World();
     world.gravity.set(0, -9.82, 0);
     world.solver.iterations = 20;
     world.defaultContactMaterial.contactEquationStiffness = 1e10;
     world.defaultContactMaterial.contactEquationRelaxation = 10;
+    world.defaultContactMaterial.frictionEquationStiffness = 1e5; 
+    world.defaultContactMaterial.frictionEquationRelaxation = 3;
+
+    this.materialMap = new Map();
+
+    for (var i = 0; i < materials.length; i++) {
+      materials[i].cannonMaterial = new CANNON.Material(materials[i].id);
+    }
+
+    // 2. Define how every material interacts with every other material
+    for (let matA of materials) {
+      for (let matB of materials) {
+        const contact = new CANNON.ContactMaterial(
+          matA.cannonMaterial, 
+          matB.cannonMaterial, 
+          {
+            friction: Math.sqrt(matA.friction * matB.friction),
+            restitution: Math.sqrt(matA.restitution * matB.restitution)
+          }
+        );
+        world.addContactMaterial(contact);
+      }
+    }
 
     this.bodies = [];
     for (var i = 0; i < objects.length; i++) {
@@ -518,7 +544,7 @@ class PhysicsController {
       var localOffset = new CANNON.Vec3(0, 0, 0); 
 
       var body;
-      var density = 5;
+      var density = obj.material.density;
       if (obj.type == "Sphere") {
         var radius = scale.x;
         var shape = new CANNON.Sphere(radius);
@@ -712,6 +738,11 @@ class PhysicsController {
       body.position.set(pos.x + worldOffset.x, pos.y + worldOffset.y, pos.z + worldOffset.z);
       body.shapeOffset = localOffset;
       body.quaternion.set(quat.x, quat.y, quat.z, quat.w);
+
+      body.velocity.set(obj.velocity[0],obj.velocity[1],obj.velocity[2]);
+      body.angularVelocity.set(obj.angularVelocity[0],obj.angularVelocity[1],obj.angularVelocity[2]);
+
+      body.material = obj.material.cannonMaterial;
 
       world.addBody(body);
       body.renderer = obj;
