@@ -1439,17 +1439,18 @@ function startClicked() {
   var type = Number(prompt("Enter type:\nPhoto = 0, Animation = 1, Simulation = 2")||0);
   if (type == 1) {
     var fps = Number(prompt("Enter framerate:","24")||24);
-    var samps = Number(prompt("Enter samples per frame:","128")||128);
-    var duration = 0;
+    var spp = Number(prompt("Enter samples per pixel:","128")||128);
+    var dur = 0;
     for (var i of AnimationPanel.keyframes) {
-      for (var j = 0; j < i[1].length; j++) duration = Math.max(duration,i[1][j].time);
+      for (var j = 0; j < i[1].length; j++) dur = Math.max(dur,i[1][j].time);
     }
-    if (duration > 0) startAnimation(fps,samps,duration);
+    if (dur > 0) startAnimation(fps,spp,dur);
   } else if (type == 2) {
     var fps = Number(prompt("Enter framerate:","24")||24);
-    var samps = Number(prompt("Enter samples per frame:","128")||128);
-    var duration = Number(prompt("Enter duration:","1")||1);
-    startSimulation(fps,samps,duration);
+    var spp = Number(prompt("Enter samples per pixel:","128")||128);
+    var dur = Number(prompt("Enter duration:","1")||1);
+    var psps = Number(prompt("Enter physics steps per second:","120")||120);
+    startSimulation(fps,spp,dur,psps);
   } else {
     startRender();
   }
@@ -1489,7 +1490,7 @@ async function startAnimation(fps,samples,duration) {
     AnimationPanel.updateUI();
   });
 }
-async function startSimulation(fps,samp,dur) {
+async function startSimulation(fps,spp,dur,psps) {
   //var samp = parseInt(document.getElementById("samples").value);
   //var fps = parseInt(document.getElementById("fps").value);
   //var dur = parseFloat(document.getElementById("duration").value);
@@ -1497,7 +1498,7 @@ async function startSimulation(fps,samp,dur) {
   var physics = new PhysicsController(State.scene);
   var motionblur = true;
 
-  const dt = 1 / 120; 
+  const dt = 1 / psps; 
   let accumulatedTime = 0;
   
   RecordVideo((time)=>{
@@ -1512,14 +1513,15 @@ async function startSimulation(fps,samp,dur) {
       physics.update(1/fps);
     }
     return true;
-  },fps,samp,dur,()=>{
+  },fps,spp,dur,()=>{
     physics.reset();
   });
 }
-function simulate(dur) {
+function simulate(dur,psps) {
   dur = Number(prompt("Enter duration:","1")||1);
+  psps = Number(prompt("Enter physics steps per second:","120")||120);
   var physics = new PhysicsController(State.scene);
-  const dt = 1 / 120; 
+  const dt = 1 / psps;
   var time = 0;
   var interval = setInterval(()=>{
     physics.update(dt);
