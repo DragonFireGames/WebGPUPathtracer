@@ -1020,6 +1020,9 @@ const renderInspector = () => {
     n.removeMaterial = ()=>{ n.material = defaultMaterial; mslot.textContent = "None (Default) - Drop Material"; }
     m.add(n, 'removeMaterial').name('Remove Material');
 
+    const ph = gui.addFolder('Physics Properties');
+    const v = ph.addFolder('Velocity'); v.add(n.velocity, 0).name('X').listen(); v.add(n.velocity, 1).name('Y').listen(); v.add(n.velocity, 2).name('Z').listen();
+    const av = ph.addFolder('Angular Velocity'); av.add(n.angularVelocity, 0).name('X').listen(); av.add(n.angularVelocity, 1).name('Y').listen(); av.add(n.angularVelocity, 2).name('Z').listen();
   } else if (State.selectedAsset) {
     const a = State.selectedAsset;
     gui.add(a, 'name').name('Asset Name').onFinishChange(renderAssets);
@@ -1064,6 +1067,11 @@ const renderInspector = () => {
       gui.add(a, 'emissionIntensity').name('Emission Intensity').onChange(updateMat);
       gui.add(a, 'ior').name('Index of Refraction').onChange(updateMat);
       gui.add(a, 'concentration').name('Concentration').onChange(updateMat);
+
+      const ph = gui.addFolder('Physics Properties');
+      ph.add(a,'density').name('Density');
+      ph.add(a,'friction',0,1).name('Friction');
+      ph.add(a,'restitution',0,1).name('Bounciness');
 
       const tp = gui.addFolder('Texture Parameters');
       tp.add(a.uvScale,'0').name("UV Scale X").onChange(updateMat);
@@ -1486,12 +1494,19 @@ async function startSimulation(fps,samp,dur) {
   //var fps = parseInt(document.getElementById("fps").value);
   //var dur = parseFloat(document.getElementById("duration").value);
 
-  var physics = new PhysicsController(State.scene.objects);
+  var physics = new PhysicsController(State.scene);
   var motionblur = true;
+
+  const dt = 1 / 120; 
+  let accumulatedTime = 0;
+  
   RecordVideo((time)=>{
     if (time == 0) return;
     if (motionblur) {
-      physics.update(1/fps/samp);
+      while (accumulatedTime < time) {
+        physics.update(dt);
+        accumulatedTime += dt;
+      }
     } else {
       if (t % 1 != 0) return;
       physics.update(1/fps);
@@ -1501,23 +1516,19 @@ async function startSimulation(fps,samp,dur) {
     physics.reset();
   });
 }
-function simulate(fps,spp,dur) {
-  fps = Number(prompt("Enter simulation framerate:","24")||24);
-  spp = Number(prompt("Enter samples per second:","128")||128);
+function simulate(dur) {
   dur = Number(prompt("Enter duration:","1")||1);
-  var physics = new PhysicsController(State.scene.objects);
+  var physics = new PhysicsController(State.scene);
+  const dt = 1 / 120; 
   var time = 0;
   var interval = setInterval(()=>{
-    var dt = 1/fps/spp;
-    for (var i = 0; i < Math.min(Math.max(1000/fps/spp,1)/1000*fps*spp,5); i++) {
-      physics.update(dt);
-      time += dt;
-    }
+    physics.update(dt);
+    time += dt;
     if (time > dur) {
       physics.reset();
       clearInterval(interval);
     }
-  },Math.max(1000/fps/spp,1));
+  },1000*dt);
 }
 
 async function RecordVideo(animate,fps,samples,duration,callback) {
