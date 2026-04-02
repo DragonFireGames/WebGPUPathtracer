@@ -527,7 +527,7 @@ class PhysicsController {
           matB.cannonMaterial, 
           {
             friction: Math.sqrt(matA.friction * matB.friction),
-            restitution: Math.sqrt(matA.restitution * matB.restitution)
+            restitution: Math.sqrt(matA.restitution * matB.restitution),
           }
         );
         world.addContactMaterial(contact);
