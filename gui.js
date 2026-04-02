@@ -1053,6 +1053,7 @@ const renderInspector = () => {
       a.sphericalUVs = ()=>{a.calculateSphericalUVs();updateModelGeometry();}
       gui.add(a, 'faceNormals').name('Calculate Face Normals').onChange(updateModel);
       gui.add(a, 'smoothNormals').name('Calculate Smooth Normals').onChange(updateModel);
+      gui.add(a, 'sphericalUVs').name('Calculate Spherical UVs').onChange(updateModel);
     }
     if (a instanceof Material) {
       var updateMat = ()=>{ generateMaterialPreview(a); img.src = renderPreview(a,256); renderAssets(); }
@@ -1128,7 +1129,8 @@ gl_canvas.ondrop = e => {
   if (asset && (asset instanceof ModelData || asset instanceof Material)) {
     if (asset instanceof ModelData) {
       // Drop Model: Create Model Node automatically
-      const n = State.scene.newModel("Model ("+asset.name+")",defaultMaterial, asset); 
+      var mat = State.assets.filter(a=>a instanceof Material)[0] || defaultMaterial;
+      const n = State.scene.newModel("Model ("+asset.name+")",mat, asset); 
       State.nodes.push(n); selectNode(n.id);
     } else {
       // Drop Material: Find intersected Node
@@ -1250,6 +1252,7 @@ document.getElementById('ctx-duplicate').onclick = () => {
     var c = new o.constructor(o.name,o.material);
     for (var i in o) {
       if (i != "id") c[i] = o[i];
+      if (c[i] instanceof Array) c[i] = new Array(...c[i]);
       if (c[i] instanceof Float32Array) c[i] = new Float32Array(c[i]);
     }
     o.vaoData = null;
@@ -1402,7 +1405,6 @@ function SaveRender(name) {
   link.download = (name||'render')+'.jpeg';
   document.body.appendChild(link);
   link.click();
-  ui.count++;
 }
 function updateScene(scene) {
   scene.objects = State.nodes;
@@ -1499,6 +1501,24 @@ async function startSimulation(fps,samp,dur) {
     physics.reset();
   });
 }
+function simulate(fps,spp,dur) {
+  fps = Number(prompt("Enter simulation framerate:","24")||24);
+  spp = Number(prompt("Enter samples per second:","128")||128);
+  dur = Number(prompt("Enter duration:","1")||1);
+  var physics = new PhysicsController(State.scene.objects);
+  var time = 0;
+  var interval = setInterval(()=>{
+    var dt = 1/fps/spp;
+    for (var i = 0; i < Math.min(Math.max(1000/fps/spp,1)/1000*fps*spp,5); i++) {
+      physics.update(dt);
+      time += dt;
+    }
+    if (time > dur) {
+      physics.reset();
+      clearInterval(interval);
+    }
+  },Math.max(1000/fps/spp,1));
+}
 
 async function RecordVideo(animate,fps,samples,duration,callback) {
   const canvas = document.getElementById('gpuCanvas');
@@ -1542,7 +1562,7 @@ async function RecordVideo(animate,fps,samples,duration,callback) {
     }
     renderer.render();
     sppElement.innerText = renderer.frame + " / " + samples;
-    if (counter >= samples*frames) {
+    if (counter >= samples*frames || encoder._saveEarly) {
       console.log("Starting Compile");
       status.innerText = 'Status: Starting Compile';
       console.log(encoder);
@@ -1592,7 +1612,11 @@ async function RecordVideo(animate,fps,samples,duration,callback) {
 
 function closeRenderPopup() {
   document.getElementById('render-modal').style.display='none';
-  renderActive = null;
+  if (window._encoder) {
+    window._encoder._saveEarly = true;
+  } else {
+    renderActive = null;
+  }
   document.getElementById('btn-start-render').textContent = "START RENDER";
 }
 
