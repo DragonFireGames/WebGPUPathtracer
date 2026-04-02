@@ -59,7 +59,7 @@ var SceneList = [
       //
       rookModel.renormalize(true);
       rookModel.generateBVH();
-      diamondModel.renormalize(true);
+      diamondModel.renormalize();
       diamondModel.generateBVH();
 
       var matWhite = new Material("White",0,[0.8, 0.8, 0.8], 1.0, [0, 0, 0]);
@@ -107,7 +107,14 @@ var SceneList = [
       //model.translate(0,1,0);
 
       var matDiamond = new Material("Diamond Material",2,[1.0, 1.0, 1.0], 0.0, [0, 0, 0],{ior:2.4});
-      var model = scene.newModel("Diamond",matDiamond,diamondModel,false);
+      var model = scene.newModel("Diamond",matDiamond,diamondModel,false).translate(0,1,0);
+      model.icon = "💎";
+      model.collider = new ConvexCollider();
+      model.collider.hulls = [{
+        verts: Array.from(diamondModel.vertex_positions),
+        faces: Array.from(diamondModel.index_positions),
+        offset: [0,0,0]
+      }];
       scene.newModel("Rook",matRedGlass,rookModel,false).translate(-1,0,-1);
       
       //var t = scene.newTorus("Torus",matRedGlass,0.5);
