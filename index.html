@@ -74,69 +74,23 @@
           </div>
         </div>
         <div id="animation-tab" class="tab-pane">
-          <div id="animation-controls" style="
-              padding: 8px 12px;
-              background: #222;
-              border-bottom: 1px solid #333;
-              display: flex;
-              align-items: center;
-              gap: 8px;
-            "
-          >
-            <button
-              id="animation-play-btn"
-              class="btn-small"
-              style="
-                background: var(--accent);
-                color: white;
-                font-size: 12px;
-                padding: 4px 8px;
-              "
-              onclick="AnimationPanel.togglePlay()"
-            >
+          <div id="animation-controls" style="padding: 8px 12px; background: #222; border-bottom: 1px solid #333; display: flex; align-items: center;">
+            <button id="animation-play-btn"  class="btn-small" style="background: var(--accent); color: white; font-size: 12px; padding: 4px 8px;" onclick="AnimationPanel.togglePlay()">
               ▶
             </button>
-            <span
-              id="animation-time"
-              style="
-                font-size: 11px;
-                color: #888;
-                min-width: 60px;
-              "
-              >0:00 / 1:00</span
-            >
+            <button id="animation-reset-btn"  class="btn-small" style="background: var(--accent); color: white; font-size: 12px; padding: 4px 8px;" onclick="AnimationPanel.currentTime = 0; AnimationPanel.updateUI()">
+              🔄
+            </button>
+            <span id="animation-time" style="font-size: 11px; color: #888; min-width: 60px;">
+              0:00 / 0:10
+            </span>
           </div>
-          <div
-            id="animation-drop-zone"
-            class="scroll-area"
-            style="
-              display: flex;
-              flex-direction: column;
-              position: relative;
-            "
-          >
-            <div
-              id="animation-lanes-wrapper"
-              class="animation-lanes-wrapper"
-            >
-              <div
-                id="animation-seeker"
-                class="animation-seeker"
-              ></div>
-              <div
-                id="animation-lanes"
-                class="animation-lanes"
-              ></div>
+          <div id="animation-drop-zone" class="scroll-area" style="display: flex; flex-direction: column; position: relative;">
+            <div id="animation-lanes-wrapper" class="animation-lanes-wrapper">
+              <div id="animation-seeker" class="animation-seeker"></div>
+              <div id="animation-lanes" class="animation-lanes"></div>
             </div>
-            <div
-              id="animation-empty-state"
-              style="
-                color: #666;
-                padding: 12px;
-                text-align: center;
-                font-size: 12px;
-              "
-            >
+            <div id="animation-empty-state" style=" color: #666; padding: 12px; text-align: center; font-size: 12px; " >
               Drag items from Hierarchy to add animations
             </div>
           </div>
