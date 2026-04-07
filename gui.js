@@ -58,6 +58,7 @@ defaultMaterial.name = "Default Material";
 defaultMaterial.albedoTex = new Texture(createCheckerboardDataURL(64,2,"#ff00ff","#000"), "Checkerboard");
 var renderCanvas = document.createElement('canvas');
 const State = { tool: 't', scene: new Scene(renderCanvas), nodes: [], assets: [], selected: null, selectedAsset: null, idCounter: 1 };
+State.scene.camera.target = Cam.target; State.scene.camera.position = Cam.position;
 State.backgroundColor = [0.8,0.85,0.9];
 State.backgroundIntensity = 1;
 State.background = null;
@@ -1415,7 +1416,7 @@ function SaveRender(name) {
   link.click();
 }
 function updateScene(scene) {
-  scene.objects = State.nodes;
+  scene.objects = State.nodes//.filter(n=>n.type!="Camera");
   var col = State.backgroundColor;
   var mod = State.backgroundIntensity;
   if (!State.background) scene.background = new HDRTexture([col[0]*mod,col[1]*mod,col[2]*mod,1]);

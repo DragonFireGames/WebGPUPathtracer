@@ -273,8 +273,11 @@ var SceneList = [
       var scene = new Scene(canvas);
       
       // Position camera to look down at the circle
-      scene.camera.setPosition(0, 5, 6);
-      scene.camera.lookAt(0, 0, 0);
+      //scene.camera.setPosition(0, 5, 6);
+      //scene.camera.lookAt(0, 0, 0);
+      var cam = scene.camera;
+      cam.lookAt(0.678,-1.275,0.521);
+      cam.setPosition(10.138,8.744,10.696);
 
       //scene.background = new HDRTexture([0.001,0.001,0.001,1]);
       scene.background = new HDRTexture('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/venice_sunset_2k.hdr',"Venice Sunset");
@@ -373,8 +376,8 @@ var SceneList = [
         density: 50,
       });
       var heavyBall = scene.newSphere("Heavy Ball",heavyMat,0,1,-11,1);
-      heavyBall.velocity[2] = 10;
-      heavyBall.angularVelocity[0] = 10;
+      heavyBall.velocity[2] = 30;
+      heavyBall.angularVelocity[0] = 30;
 
 
       //scene.newModel(matGround,diamondModel,true);
@@ -486,6 +489,7 @@ async function loadScene() {
   State.scene = scene;
   Cam.updateOrbit(scene.camera.position,scene.camera.target);
   State.nodes = scene.objects;
+  //State.nodes.unshift(); // add camera
 
   State.assets = [];
   if (scene.background) {

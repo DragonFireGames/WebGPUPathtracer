@@ -1259,6 +1259,9 @@ Model.getSchema = function(mesh) {
 
 class Camera {
   constructor(canvas) {
+    this.type = "Camera";
+    this.name = "Camera";
+    this.id = "camera";
     this.position = vec3.fromValues(0, 1.5, 4.5);
     this.target = vec3.fromValues(0, 0.5, 0);
     this.fov = 45;

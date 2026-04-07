@@ -35,7 +35,7 @@ const AnimationPanel = {
   },
 
   insertKeyframe(nodeId, noRender) {
-    const node = State.nodes.find((n) => n.id === nodeId);
+    const node = nodeId == 'camera' ? State.scene.camera : State.nodes.find((n) => n.id === nodeId);
     if (!node) return;
 
     // Add item to animation if it doesn't exist
@@ -44,7 +44,12 @@ const AnimationPanel = {
     }
 
     const keyframes = this.keyframes.get(nodeId) || [];
-    const newKeyframe = {
+    const newKeyframe = node.type == "Camera" ? {
+      time: this.currentTime,
+      target: [...node.target],
+      position: [...node.position],
+      easing: "linear",
+    } : {
       time: this.currentTime,
       position: [...node.position],
       rotation: [...node.rotation],
@@ -149,8 +154,7 @@ const AnimationPanel = {
   },
 
   applyEasing(t, easingType = "linear") {
-    const fn =
-      this.easingFunctions[easingType] || this.easingFunctions.linear;
+    const fn = this.easingFunctions[easingType] || this.easingFunctions.linear;
     return fn(t);
   },
 
@@ -168,7 +172,7 @@ const AnimationPanel = {
     for (const [nodeId, keyframes] of this.keyframes.entries()) {
       if (keyframes.length === 0) continue;
 
-      const node = State.nodes.find((n) => n.id === nodeId);
+      const node = nodeId == 'camera' ? State.scene.camera : State.nodes.find((n) => n.id === nodeId);
       if (!node) continue;
 
       // Find the keyframes to interpolate between
@@ -186,21 +190,36 @@ const AnimationPanel = {
         let t = (this.currentTime - kf1.time) / (kf2.time - kf1.time);
         t = this.applyEasing(t, kf1.easing);
         vec3.lerp(node.position,kf1.position,kf2.position,t);
-        quat.lerp(node.rotation,kf1.rotation,kf2.rotation,t);
-        quat.normalize(node.rotation,node.rotation);
-        vec3.lerp(node.scale,kf1.scale,kf2.scale,t);
+        if (node.type == "Camera") {
+          vec3.lerp(node.target,kf1.target,kf2.target,t);
+        } else {
+          quat.slerp(node.rotation,kf1.rotation,kf2.rotation,t);
+          vec3.lerp(node.scale,kf1.scale,kf2.scale,t);
+        }
       } else if (kf1 && !kf2 || kf1 === kf2) {
         // Use the last keyframe
         node.position = [...kf1.position];
-        node.rotation = [...kf1.rotation];
-        node.scale = [...kf1.scale];
+        if (node.type == "Camera") {
+          node.target = [...kf1.target];
+        } else {
+          node.position = [...kf1.position];
+          node.rotation = [...kf1.rotation];
+          node.scale = [...kf1.scale];
+        }
       } else if (!kf1 && kf2) {
         // Use the first keyframe
         node.position = [...kf2.position];
-        node.rotation = [...kf2.rotation];
-        node.scale = [...kf2.scale];
+        if (node.type == "Camera") {
+          node.target = [...kf2.target];
+        } else {
+          node.rotation = [...kf2.rotation];
+          node.scale = [...kf2.scale];
+        }
       }
-      node.updateMatrix();
+      if (node.type == "Camera") {
+        Cam.updateOrbit(node.position,node.target);
+        node.updateRays();
+      } else node.updateMatrix();
     }
   },
 
@@ -344,6 +363,25 @@ function setEasing(easing) {
 function removeKeyframe() {
   AnimationPanel.removeKeyframe(window.currentKeyframeContext.nodeId, window.currentKeyframeContext.time); 
   document.getElementById('keyframe-context-menu').style.display = 'none';
+}
+
+async function recordCamera() {
+  var areset = confirm("Reset the camera?");
+  var fps = Number(prompt("Enter framerate:","24")||24);
+  var dur = Number(prompt("Enter duration:","1")||1);
+  await wait(2000);
+  var dt = 1/fps;
+  if (areset) {
+    AnimationPanel.currentTime = 0;
+    AnimationPanel.removeItem('camera',false);
+  }
+  for (var i = 0; i < fps * dur; i++) {
+    AnimationPanel.insertKeyframe('camera',false);
+    AnimationPanel.currentTime += dt;
+    AnimationPanel.updateUI();
+    await wait(dt*1000);
+  }
+  AnimationPanel.insertKeyframe('camera',false);
 }
 
 function loadJSON(url, callback) {
@@ -594,10 +632,10 @@ class PhysicsController {
         body.addShape(shape, new CANNON.Vec3(0, (height / 2) - yComFromBottom, 0));
         body.updateMassProperties();
       } else if (obj.type == "Torus") {
-        const majorRadius = scale.x; // R
-        const tubeRadius = obj.inner_radius * scale.x; // r
-        const majorSegments = 16; // How many wedges to create
-        const tubeSegments = 8;  // How "round" the tube cross-section is
+        const majorRadius = scale.x;
+        const tubeRadius = obj.inner_radius * scale.x;
+        const majorSegments = 16;
+        const tubeSegments = 8;
 
         const volume = (2 * Math.PI * majorRadius) * (Math.PI * tubeRadius * tubeRadius);
         body = new CANNON.Body({
@@ -606,53 +644,77 @@ class PhysicsController {
 
         var generateWedgeFaces = function(segments) {
           const faces = [];
-          // Side faces (connecting the two rings)
           for (let i = 0; i < segments; i++) {
             const next = (i + 1) % segments;
-            // The vertices array has 'segments' points for theta1, then 'segments' for theta2
-            faces.push([i, next, next + segments, i + segments]);
+            // Vertices 0..segments-1 are theta1 (slice A)
+            // Vertices segments..2*segments-1 are theta2 (slice B)
+            const a = i;
+            const b = next;
+            const c = next + segments;
+            const d = i + segments;
+
+            // Winding [a, b, c, d] points the normal OUTWARDS for these wedges
+            faces.push([a, b, c, d]);
           }
-          // Cap faces (the two rings themselves)
-          const ring1 = [], ring2 = [];
+
+          // Cap A (the slice at theta1) - Looking at the slice from outside the wedge
+          const capA = [];
+          for (let i = segments - 1; i >= 0; i--) {
+            capA.push(i);
+          }
+          faces.push(capA);
+
+          // Cap B (the slice at theta2) - Looking at the slice from outside the wedge
+          const capB = [];
           for (let i = 0; i < segments; i++) {
-            ring1.push(i);
-            ring2.push(segments + segments - 1 - i); // Reversed for winding order
+            capB.push(i + segments);
           }
-          faces.push(ring1);
-          faces.push(ring2);
+          faces.push(capB);
+
           return faces;
         };
 
-        // Generate wedges to form the ring
+        const wedgeFaces = generateWedgeFaces(tubeSegments);
+
         for (let i = 0; i < majorSegments; i++) {
           const theta1 = (i / majorSegments) * Math.PI * 2;
           const theta2 = ((i + 1) / majorSegments) * Math.PI * 2;
-        
+          const midTheta = (theta1 + theta2) / 2;
+
+          // Local center of this wedge
+          const offsetX = majorRadius * Math.cos(midTheta);
+          const offsetY = 0;
+          const offsetZ = majorRadius * Math.sin(midTheta);
+          const shapeOffset = new CANNON.Vec3(offsetX, offsetY, offsetZ);
+
           const vertices = [];
-          // For each wedge, we take two "slices" of the tube and connect them
+          // Generate two circular slices of the tube
           [theta1, theta2].forEach(theta => {
             for (let j = 0; j < tubeSegments; j++) {
               const phi = (j / tubeSegments) * Math.PI * 2;
-            
-              // Torus parametric equations
-              const x = (majorRadius + tubeRadius * Math.cos(phi)) * Math.cos(theta);
-              const y = tubeRadius * Math.sin(phi);
-              const z = (majorRadius + tubeRadius * Math.cos(phi)) * Math.sin(theta);
-            
-              vertices.push(new CANNON.Vec3(x, y, z));
+              const worldX = (majorRadius + tubeRadius * Math.cos(phi)) * Math.cos(theta);
+              const worldY = tubeRadius * Math.sin(phi);
+              const worldZ = (majorRadius + tubeRadius * Math.cos(phi)) * Math.sin(theta);
+
+              // Center vertices around (0,0,0) for this specific shape
+              vertices.push(new CANNON.Vec3(
+                worldX - offsetX,
+                worldY - offsetY,
+                worldZ - offsetZ
+              ));
             }
           });
 
-          // Use Cannon's helper to create a convex hull from these points
-          // Note: For complex shapes, you'd define faces, but for a small
-          // number of points, some Cannon versions can auto-generate the hull.
-          // If your version requires faces, use the logic below:
           const shape = new CANNON.ConvexPolyhedron({
             vertices: vertices,
-            faces: generateWedgeFaces(tubeSegments)
+            faces: wedgeFaces
           });
 
-          body.addShape(shape);
+          // Recalculate normals based on the new CCW order
+          shape.computeNormals();
+          shape.updateBoundingSphereRadius();
+
+          body.addShape(shape, shapeOffset);
         }
 
         body.updateMassProperties();

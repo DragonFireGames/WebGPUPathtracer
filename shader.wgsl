@@ -886,14 +886,25 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   rand_pcg();
 
   let screen_uv = (vec2f(id.xy) + vec2f(rand_pcg(), rand_pcg())) / vec2f(f32(params.width), f32(params.height));
+  // let screen_uv = (vec2f(id.xy) + vec2f(0.5)) / vec2f(f32(params.width), f32(params.height)); // no aliasing
   let ray_dir = normalize(mix(mix(params.ray00, params.ray10, screen_uv.x), mix(params.ray01, params.ray11, screen_uv.x), 1.-screen_uv.y));
   var ray = Ray(params.eye, ray_dir);
 
-  //var hit = trace_scene(ray);
-  //textureStore(output_tex, id.xy, vec4f(vec3f(1.-log(log(hit.t)+1.)), 1.0));
-  //textureStore(output_tex, id.xy, vec4f(hit.hit_n, 1.0));
-  //hit.hit_uv = fract(hit.hit_uv); textureStore(output_tex, id.xy, vec4f(hit.hit_uv.x,hit.hit_uv.y,1. - hit.hit_uv.x * hit.hit_uv.y, 1.0));
-  //return;
+  // var hit = trace_scene(ray); 
+  // if (hit.m_idx == -1) {
+  //   textureStore(output_tex, id.xy, vec4f(vec3f(0.0), 1.0));
+  //   return;
+  // }
+  // var mat = materials[hit.m_idx];
+  // let tbn = mat3x3f(hit.tangent, hit.bitangent, hit.hit_n);
+  // var final_uv = hit.hit_uv * mat.uv_scale;
+  // var ctx = get_surface_context(hit, mat, tbn, final_uv);
+  // textureStore(output_tex, id.xy, vec4f(vec3f(hit.t/50.0), 1.0));
+  // textureStore(output_tex, id.xy, vec4f(hit.hit_n * 0.5 + vec3f(0.5), 1.0));
+  // textureStore(output_tex, id.xy, vec4f(ray.origin + hit.t * ray.direction, 1.0));
+  // textureStore(output_tex, id.xy, vec4f(ctx.albedo, 1.0));
+  // hit.hit_uv = fract(hit.hit_uv); textureStore(output_tex, id.xy, vec4f(hit.hit_uv.x,hit.hit_uv.y,1. - hit.hit_uv.x * hit.hit_uv.y, 1.0));
+  // return;
   
   var throughput = vec3f(1.0);
   var radiance = vec3f(0.0);
