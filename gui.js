@@ -1092,16 +1092,18 @@ const renderInspector = () => {
       a.centerOrigin = ()=>{a.renormalize(false);updateModelGeometry();}
       a.bottomOrigin = ()=>{a.renormalize(true);updateModelGeometry();}
 
-      gui.add(a, 'centerOrigin').name('Center Origin');
-      gui.add(a, 'bottomOrigin').name('Bottom Origin');
+      gui.add(a, 'centerOrigin').name('Normalize Center Origin');
+      gui.add(a, 'bottomOrigin').name('Normalize Bottom Origin');
 
-      a.rotX90deg = ()=>{a.bakeTransform(mat4.fromRotation(mat4.create(), Math.PI / 2, [1, 0, 0]));updateModelGeometry();}
-      a.rotY90deg = ()=>{a.bakeTransform(mat4.fromRotation(mat4.create(), Math.PI / 2, [0, 1, 0]));updateModelGeometry();}
-      a.rotZ90deg = ()=>{a.bakeTransform(mat4.fromRotation(mat4.create(), Math.PI / 2, [0, 0, 1]));updateModelGeometry();}
+      a.rotationAmount = 90;
+      a.rotXdeg = ()=>{a.bakeTransform(mat4.fromRotation(mat4.create(), a.rotationAmount * Math.PI / 180, [1, 0, 0]));updateModelGeometry();}
+      a.rotYdeg = ()=>{a.bakeTransform(mat4.fromRotation(mat4.create(), a.rotationAmount * Math.PI / 180, [0, 1, 0]));updateModelGeometry();}
+      a.rotZdeg = ()=>{a.bakeTransform(mat4.fromRotation(mat4.create(), a.rotationAmount * Math.PI / 180, [0, 0, 1]));updateModelGeometry();}
       
-      gui.add(a, 'rotX90deg').name('Rotate X 90 degrees').onChange(updateModel);
-      gui.add(a, 'rotY90deg').name('Rotate Y 90 degrees').onChange(updateModel);
-      gui.add(a, 'rotZ90deg').name('Rotate Z 90 degrees').onChange(updateModel);
+      gui.add(a, 'rotationAmount', -180, 180).name('Rotation Amount');
+      gui.add(a, 'rotXdeg').name('Rotate X').onChange(updateModel);
+      gui.add(a, 'rotYdeg').name('Rotate Y').onChange(updateModel);
+      gui.add(a, 'rotZdeg').name('Rotate Z').onChange(updateModel);
 
       a.faceNormals = ()=>{a.calculateFaceNormals();updateModelGeometry();}
       a.smoothNormals = ()=>{a.calculateSmoothNormals();updateModelGeometry();}
@@ -1122,8 +1124,8 @@ const renderInspector = () => {
       disp.add(a, 'specularTint', 0, 1).name('Specular Tint').onChange(updateMat);
       //disp.add(a, 'anisotropic', 0, 1).name('Anisotropic').onChange(updateMat);
       //disp.add(a, 'anisotropicRotation', 0, 1).name('Aniso Rotation').onChange(updateMat);
-      //disp.add(a, 'sheen', 0, 1).name('Sheen').onChange(updateMat);
-      //disp.add(a, 'sheenTint', 0, 1).name('Sheen Tint').onChange(updateMat);
+      disp.add(a, 'sheen', 0, 1).name('Sheen').onChange(updateMat);
+      disp.add(a, 'sheenTint', 0, 1).name('Sheen Tint').onChange(updateMat);
       
       const coat = disp.addFolder('Clear Coat');
       coat.add(a, 'clearcoat', 0, 1).name('Strength').onChange(updateMat);

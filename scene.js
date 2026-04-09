@@ -3,6 +3,21 @@
 var SelectedScene = 0; 
 var SceneList = [
   {
+    name: "Starter Box",
+    load: async function() {},
+    create: async function(canvas) {
+      canvas.width = 1280;
+      canvas.height = 720;
+      var scene = new Scene(canvas);
+      var cam = scene.camera;
+      cam.lookAt(0,1,0);
+      cam.setPosition(8.17,4.62,4.47);
+      var mat = new Material("Material 1",[0.8,0.8,0.8],0.5);
+      scene.newCube("Cube 1",mat,-1,0,-1,1,2,1);
+      return scene;
+    }
+  },
+  {
     name: "Rook & Diamond",
     load: async function() {},
     create: async function(canvas) {
@@ -199,7 +214,7 @@ var SceneList = [
     }
   },
   {
-    name: "Random Sphere Forest",
+    name: "Random Objects",
     load: async function() {},
     create: async function(canvas) {
       canvas.width = 1024// * 3/4;
@@ -439,8 +454,8 @@ function mulberry32(a) {
 // --- MAIN ---
 
 async function loadScene() {
-  if (!confirm("This will override the current scene, do you wish to continue?")) return;
-  SelectedScene = Number(prompt("Enter a scene number (0-3)")) || 0;
+  SelectedScene = Number(prompt("Enter a scene number (0-5)")) || 0;
+  if (!confirm("Loading "+SceneList[SelectedScene].name+"\nThis will override the current scene, do you wish to continue?")) return;
   if (SceneList[SelectedScene].load) await SceneList[SelectedScene].load();
   const canvas = document.getElementById('gpuCanvas');
   var scene = await SceneList[SelectedScene].create(canvas);
