@@ -21,21 +21,41 @@ struct SceneParams {
   ray11: vec3f, seed: u32,
 };
 
-struct Material { 
-  albedo: vec3f,
-  roughness: f32, 
+struct Material {
+  color: vec3f,
+  metallic: f32,
+
+  roughness: f32,
+  ior: f32,
+  specular_tint: f32,
+  anisotropic: f32,
+
+  aniso_rotation: f32,
+  sheen: f32,
+  sheen_tint: f32,
+  clearcoat: f32,
+
+  clearcoat_gloss: f32,
+  clearcoat_ior: f32,
+  transmission: f32,
+  concentration: f32,
+
+  subsurface_tint: vec3f,
+  subsurface: f32,
+
   emittance: vec3f,
-  material_type: i32,
-  // Integer Texture IDs
+  emissive_idx: i32,
+
   albedo_idx: i32,
   normal_idx: i32,
   height_idx: i32,
   roughness_idx: i32,
+
+  metallic_idx: i32,
+  _pad1: f32,
   uv_scale: vec2f,
-  ior: f32,
-  concentration: f32,
-  // Height Params
-  height_params: vec4f  // x: norm_mult, y: multiplier, z: samples, w: offset
+
+  height_params: vec4f, // x: norm_mult, y: multiplier, z: samples, w: offset
 };
 
 struct TransformedObject { 
@@ -836,44 +856,142 @@ fn fresnel(I: vec3f, N: vec3f, ior: f32, ior2: f32) -> f32 {
 }
 
 struct SurfaceContext {
-  albedo: vec3f,
   normal: vec3f,
-  emittance: vec3f,
+  surface_normal: vec3f,
+  albedo: vec3f,
   roughness: f32,
+  metallic: f32,
+  emittance: vec3f,
 };
 
 fn get_surface_context(hit: SurfaceHit, mat: Material, tbn: mat3x3f, uv: vec2f) -> SurfaceContext {
   var ctx: SurfaceContext;
   
-  // 1. Resolve Normal
+  // 1. Resolve Normal (Top Layer/Base)
   ctx.normal = hit.hit_n;
-  let normal_idx = mat.normal_idx;
-  if (normal_idx >= 0) {
-    var n_map = sample_texture(normal_idx, uv).xyz * 2.0 - 1.0;
-    n_map.y = -n_map.y; // Standard Y-flip for many normal map formats
+  ctx.surface_normal = hit.hit_n;
+  if (mat.normal_idx >= 0) {
+    var n_map = sample_texture(mat.normal_idx, uv).xyz * 2.0 - 1.0;
+    // Apply normal multiplier from Block 9
     n_map = normalize(n_map * vec3f(mat.height_params.x, mat.height_params.x, 1.0));
     ctx.normal = normalize(tbn * n_map);
   }
 
-  // 2. Resolve Albedo
-  ctx.albedo = mat.albedo;
-  let albedo_idx = mat.albedo_idx;
-  if (albedo_idx >= 0) {
-    let tex_color = sample_texture(albedo_idx, uv);
-    ctx.albedo *= pow(tex_color.rgb, vec3f(2.2)); // sRGB to Linear
+  // 2. Resolve Albedo (Base Color)
+  ctx.albedo = mat.color;
+  if (mat.albedo_idx >= 0) {
+    let tex_color = sample_texture(mat.albedo_idx, uv);
+    ctx.albedo *= pow(tex_color.rgb, vec3f(2.2)); 
   }
 
+  // 3. Resolve Roughness
   ctx.roughness = mat.roughness;
-  let roughness_idx = mat.roughness_idx;
-  if (roughness_idx >= 0) {
-    ctx.roughness *= sample_texture(roughness_idx, uv).r;
+  if (mat.roughness_idx >= 0) {
+    ctx.roughness *= sample_texture(mat.roughness_idx, uv).g;
   }
 
-  // 3. Resolve Emittance
+  // 4. Resolve Metallic
+  ctx.metallic = mat.metallic;
+  if (mat.metallic_idx >= 0) {
+    ctx.metallic *= sample_texture(mat.metallic_idx, uv).b;
+  }
+
+  // 5. Resolve Emittance (Color * Texture)
   ctx.emittance = mat.emittance;
+  if (mat.emissive_idx >= 0) {
+    let e_tex = sample_texture(mat.emissive_idx, uv).rgb;
+    ctx.emittance *= pow(e_tex, vec3f(2.2));
+  }
   
   return ctx;
 }
+
+fn sample_bsdf(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, radiance: ptr<function, vec3f>, hit: SurfaceHit, mat: Material, ctx: SurfaceContext, hit_pos: vec3f, beers_dist: ptr<function, f32>) -> bool {
+  let V = -(*ray).direction;
+  let dotNV = dot(ctx.normal, V);
+  let entering = dotNV > 0.0;
+  
+  let n_orient = select(-ctx.normal, ctx.normal, entering);
+  let sn_orient = select(-ctx.surface_normal, ctx.surface_normal, entering);
+  let dotSNV = max(dot(sn_orient, V), 1e-6);
+  
+  let roughness_val = ctx.roughness;
+  let base_roughness = roughness_val * roughness_val;
+  let cc_roughness = (1.0 - mat.clearcoat_gloss) * (1.0 - mat.clearcoat_gloss);
+
+  // --- FRESNEL & TINT CALCULATIONS ---
+  let cc_f0 = pow((1.0 - mat.clearcoat_ior) / (1.0 + mat.clearcoat_ior), 2.0);
+  let Fcc_base = cc_f0 + (1.0 - cc_f0) * pow(1.0 - max(dotSNV, 0.0), 5.0);
+  let w_cc = mat.clearcoat * Fcc_base;
+  
+  let kr_smooth = fresnel((*ray).direction, ctx.normal, mat.ior, 1.0);
+  let f90_rough = saturate(1.0 - roughness_val);
+  let kr = kr_smooth * f90_rough;
+  
+  let lum = dot(ctx.albedo, vec3f(0.2126, 0.7152, 0.0722));
+  let tint = select(ctx.albedo / max(lum, 0.0001), vec3f(1.0), lum <= 0.0);
+  let f90_tinted = mix(vec3f(f90_rough), f90_rough * tint, mat.specular_tint);
+  let kr_tinted = mix(vec3f(kr), kr * tint, mat.specular_tint);
+  
+  let f0_dielectric = pow((1.0 - mat.ior) / (1.0 + mat.ior), 2.0);
+  let F0 = mix(mix(vec3f(f0_dielectric), f0_dielectric * tint, mat.specular_tint), ctx.albedo, ctx.metallic);
+  let F_schlick = F0 + (f90_tinted - F0) * pow(1.0 - max(abs(dotNV), 0.0), 5.0);
+
+  let F_actual = mix(F_schlick, kr_tinted, mat.transmission * (1.0 - ctx.metallic));
+  let f_avg = clamp((F_actual.r + F_actual.g + F_actual.b) / 3.0, 0.0, 1.0);
+
+  // --- PROBABILITIES ---
+  let p_cc = w_cc;
+  let p_spec = (1.0 - p_cc) * f_avg;
+  let p_trans = (1.0 - p_cc) * (1.0 - f_avg) * mat.transmission * (1.0 - ctx.metallic);
+  let p_diff = (1.0 - p_cc) * (1.0 - f_avg) * (1.0 - mat.transmission) * (1.0 - ctx.metallic);
+  let total_p = p_cc + p_spec + p_trans + p_diff;
+
+  let rng = rand_pcg();
+
+  if (rng < p_cc) {
+    (*ray).direction = normalize(mix(reflect((*ray).direction, sn_orient), sn_orient + random_unit_vector(), cc_roughness));
+    (*ray).origin = hit_pos + sn_orient * 0.001;
+  } else if (rng < p_cc + p_spec) {
+    var anim_n = n_orient;
+    if (mat.anisotropic > 0.0) {
+      let up = select(vec3f(0,1,0), vec3f(0,0,1), abs(n_orient.y) > 0.99999);
+      var T = normalize(cross(up, n_orient));
+      var B = cross(n_orient, T);
+      let angle = mat.aniso_rotation * 6.28318;
+      T = T * cos(angle) + B * sin(angle);
+      anim_n = normalize(mix(n_orient, cross(cross(V, T), T), mat.anisotropic));
+    }
+    (*ray).direction = normalize(mix(reflect((*ray).direction, anim_n), anim_n + random_unit_vector(), base_roughness));
+    (*ray).origin = hit_pos + n_orient * 0.001;
+    (*throughput) *= F_actual / max(f_avg, 0.0001);
+  } else if (rng < p_cc + p_spec + p_trans) {
+    if (!entering) { 
+      let sigma = -log(max(mat.color, vec3f(0.0001))) * mat.concentration;
+      let attenuation = exp(-sigma * (*beers_dist));
+      (*radiance) += (*throughput) * (mat.emittance * (1.0 - attenuation));
+      (*throughput) *= attenuation;
+    } else {
+      (*beers_dist) = 0.0;
+    }
+    let refr_dir = refraction((*ray).direction, ctx.normal, mat.ior, 1.0);
+    (*ray).direction = normalize(mix(refr_dir, -n_orient + random_unit_vector(), base_roughness));
+    (*ray).origin = hit_pos - n_orient * 0.005;
+  } else if (rng < total_p) {
+    (*ray).direction = normalize(ctx.normal + random_unit_vector());
+    (*ray).origin = hit_pos + ctx.normal * 0.001;
+    var diff_col = ctx.albedo;
+    if (mat.sheen > 0.0) { diff_col += mix(vec3f(1.0), ctx.albedo, mat.sheen_tint) * pow(1.0 - abs(dotNV), 5.0) * mat.sheen; }
+    if (mat.subsurface > 0.0) { diff_col = mix(diff_col, mat.subsurface_tint, mat.subsurface); }
+    (*throughput) *= diff_col;
+  } else {
+    // Pass-through (Return false to indicate a 'continue' in the main loop)
+    (*ray).origin = hit_pos - n_orient * 0.005;
+    return false;
+  }
+  return true; // Successfully sampled a bounce
+}
+
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -945,120 +1063,11 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     radiance += throughput * ctx.emittance;
     if (length(ctx.emittance) > 1) { break; }
 
-    /*
-    // Use true geometric normal for origin offset to prevent shadow acne from displaced normals
-    ray.origin = (ray.origin + ray.direction * hit.t) + hit.hit_n * 0.001;
-
-    // Use the final mapped normal for bounce reflection calculation
-    let diffuse = normalize(ctx.normal + random_unit_vector());
-    let specular = reflect(ray.direction, ctx.normal);
-    ray.direction = normalize(mix(specular, diffuse, ctx.roughness));
-    throughput *= ctx.albedo;
-
-    if (HAS_HEIGHTMAPS && height_idx >= 0) {
-      let light_ts = normalize(transpose(tbn) * (ray.direction));
-      let shadow_res = calculate_shadow_pom(final_uv, currentheight, light_ts, mat, height_idx);
-      if (shadow_res.hit) {
-        final_uv = shadow_res.uv;
-
-        let ctx = get_surface_context(hit, mat, tbn, final_uv);
-
-        radiance += throughput * ctx.emittance;
-        if (length(ctx.emittance) > 0.1) { break; }
-
-        let diffuse = normalize(ctx.normal + random_unit_vector());
-        let specular = reflect(ray.direction, ctx.normal);
-        ray.direction = normalize(mix(specular, diffuse, ctx.roughness));
-        throughput *= ctx.albedo;
-      }
-    }
-    */
-    //*
     // --- POSITION UPDATE ---
     let hit_pos = ray.origin + ray.direction * hit.t;
     
-    // --- MATERIAL LOGIC ---
-    var kr: f32 = 0.0;
-    let roughness = ctx.roughness;
-    
-    if (mat.material_type == 2) { // DIELECTRIC (Glass)
-      let cosi = dot(ray.direction, ctx.normal);
-      let entering = cosi < 0.0;
-      var normal = ctx.normal;
-      if (!entering) { normal *= -1; }
-      
-      // 1. If we hit the surface from the INSIDE, we are exiting.
-      // Apply Beer's Law to the throughput based on the distance traveled (hit.t)
-      if (entering) {
-        beers_dist = 0;
-      } else {
-        let density = mat.concentration;
-        // Absorption coefficient sigma = -log(albedo)
-        // We use max(albedo, 0.0001) to avoid log(0) which is undefined
-        let sigma = -log(max(ctx.albedo, vec3f(0.0001))) * density;
-        // Beer's Law: attenuation = e^(-sigma * distance)
-        let attenuation = exp(-sigma * beers_dist);
-        let glow = ctx.emittance * (vec3f(1.0) - attenuation);
-        
-        // Add the glow to the accumulated radiance
-        radiance += throughput * glow;
-        throughput *= attenuation;
-      }
-
-      // 2. Standard Fresnel calculation
-      // If entering: ior1=1.0, ior2=mat.ior. If exiting: ior1=mat.ior, ior2=1.0
-      let kr = fresnel(ray.direction, ctx.normal, mat.ior, 1.0);
-      
-      if (rand_pcg() > kr) {
-        // --- REFRACT ---
-        let refracted_dir = refraction(ray.direction, ctx.normal, mat.ior, 1.0);
-        
-        // Apply roughness to the transmission
-        ray.direction = normalize(mix(refracted_dir, -normal + random_unit_vector(), roughness));
-        //ray.direction = refracted_dir;
-
-        // Nudge: If entering, nudge INTO the mesh. If exiting, nudge OUT of the mesh.
-        // Since ctx.normal always faces the ray, -ctx.normal always pushes "forward"
-        ray.origin = hit_pos - normal * 0.01;
-        
-        // Note: We don't multiply by albedo here because Beer's Law handled it on exit!
-        // If you want "surface tint" in addition to volumetric, you can multiply here too.
-      } else {
-        // --- REFLECT ---
-        let specular = reflect(ray.direction, normal);
-        ray.direction = normalize(mix(specular, normal + random_unit_vector(), roughness));
-        
-        // Nudge OUTSIDE
-        ray.origin = hit_pos + normal * 0.001;
-        
-        // Reflection on glass is usually uncolored (white), so no albedo multiplication
-      }
-    }
-    else if (mat.material_type == 1) { // METAL
-      // Pure specular reflection, colored by albedo
-      let specular = reflect(ray.direction, ctx.normal);
-      ray.direction = normalize(mix(specular, ctx.normal + random_unit_vector(), roughness));
-      
-      ray.origin = hit_pos + ctx.normal * 0.001;
-      throughput *= ctx.albedo;
-    } 
-    else { // OPAQUE / PLASTIC
-      let diffuse = normalize(ctx.normal + random_unit_vector());
-      let specular = reflect(ray.direction, ctx.normal);
-      
-      // Simple Schlick approximation for plastic highlights
-      let F0 = mat.ior; // 0.04 for 1.5 
-      let F = F0 + (1.0 - F0) * pow(1.0 - max(0.0, dot(-ray.direction, ctx.normal)), 5.0);
-      
-      if (rand_pcg() < F) {
-        ray.direction = normalize(mix(specular, ctx.normal + random_unit_vector(), roughness));
-        throughput *= mix(vec3f(1.),ctx.albedo,roughness);
-      } else {
-        ray.direction = diffuse;
-        throughput *= ctx.albedo;
-      }
-      
-      ray.origin = hit_pos + ctx.normal * 0.001;
+    if (!sample_bsdf(&ray, &throughput, &radiance, hit, mat, ctx, hit_pos, &beers_dist)) {
+      break;
     }
 
     // --- HEIGHTMAP / POM LOGIC ---
@@ -1066,21 +1075,18 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
       let light_ts = normalize(transpose(tbn) * (ray.direction));
       let shadow_res = calculate_shadow_pom(final_uv, currentheight, light_ts, mat, mat.height_idx);
       if (shadow_res.hit) {
-      // Update UV and hit context for the displaced surface
-      final_uv = shadow_res.uv;
-      let ctx_pom = get_surface_context(hit, mat, tbn, final_uv);
-      
-      radiance += throughput * ctx_pom.emittance;
-      if (length(ctx_pom.emittance) > 0.1) { break; }
-      
-      // Re-apply diffuse/specular bounce based on displaced normal
-      let diffuse = normalize(ctx_pom.normal + random_unit_vector());
-      let specular = reflect(ray.direction, ctx_pom.normal);
-      ray.direction = normalize(mix(specular, diffuse, roughness));
-      throughput *= ctx_pom.albedo;
+        // Update UV and hit context for the displaced surface
+        final_uv = shadow_res.uv;
+        let ctx_pom = get_surface_context(hit, mat, tbn, final_uv);
+        
+        radiance += throughput * ctx_pom.emittance;
+        if (length(ctx_pom.emittance) > 1) { break; }
+        
+        if (!sample_bsdf(&ray, &throughput, &radiance, hit, mat, ctx_pom, hit_pos, &beers_dist)) {
+          break;
+        }
       }
     }
-    //*/
 
     // Russian Roulette
     if (bounce < 2) { continue; } 

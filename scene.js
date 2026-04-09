@@ -6,6 +6,7 @@ var SceneList = [
     name: "Rook & Diamond",
     load: async function() {},
     create: async function(canvas) {
+
       canvas.width = 400;
       canvas.height = 304;
       // canvas.width = 1024;
@@ -21,12 +22,7 @@ var SceneList = [
       var woodTex = new Texture('https://i.ibb.co/0RnQ8mp0/wood.png');
       var normalTex = new Texture('https://i.ibb.co/dJzqsKry/normal.png');
       var dispTex = new Texture('https://i.ibb.co/0ywvFnyh/disp.png');
-
-      // var bunnyModel = new ModelData().loadOBJ('assets/bunny/model.obj');
-      // var bunnyColor = new Texture('assets/bunny/color.jpg');
-      // var bunnyNormal = new Texture('assets/bunny/normal.png');
-
-      //var dragonModel = new ModelData().loadOBJ('assets/dragon-2.obj');
+      
       var rookModel = new ModelData('RookModel').loadOBJ('assets/chess-rook.obj');
       var diamondModel = new ModelData('DiamondModel').loadOBJ('assets/diamond.obj');
 
@@ -40,73 +36,24 @@ var SceneList = [
         woodTex.loaded, 
         normalTex.loaded, 
         dispTex.loaded, 
-        // bunnyModel.loaded,
-        // bunnyColor.loaded,
-        // bunnyNormal.loaded,
         rookModel.loaded,
         diamondModel.loaded,
-        // dragonModel.loaded,
-        //scene.background.loaded
+        scene.background.loaded
       ]);
-      // bunnyModel.renormalize();
-      // bunnyModel.generateBVH();
-      // const rot = mat4.create();
-      // mat4.fromXRotation(rot, -Math.PI / 2);
-      // dragonModel.bakeTransform(rot);
-      // dragonModel.renormalize(true);
-      // dragonModel.calculateSmoothNormals();
-      // dragonModel.generateBVH();
-      //
       rookModel.renormalize(true);
       rookModel.generateBVH();
       diamondModel.renormalize();
       diamondModel.generateBVH();
 
-      var matWhite = new Material("White",0,[0.8, 0.8, 0.8], 1.0, [0, 0, 0]);
-      var matRed = new Material("Red",0,[0.8, 0.2, 0.2], 1.0, [0, 0, 0]);
-      var matGreen = new Material("Green",0,[0.2, 0.8, 0.2], 1.0, [0, 0, 0]);
-      var matCeramic = new Material("Ceramic",0,[0.9, 0.9, 0.9], 0.0, [0, 0, 0]);
-      var matMetal = new Material("Mirror",1,[0.8, 0.9, 0.8], 0.0, [0, 0, 0]);
-      var matLight = new Material("Light",0,[0.0, 0.0, 0.0], 1.0, [15, 15, 15]);
+      var matWhite = new Material("White",[0.8, 0.8, 0.8], 1.0);
+      var matLight = new Material("Light",[0.0, 0.0, 0.0], 1.0, {emissionIntensity: 15});
 
-      // Set up the robust POM material!
-      var toyBox = new Material("Toy Box",0,[1.0, 1.0, 1.0], 0.5, [0, 0, 0], {
-        albedoTex: woodTex,
-        normalTex: normalTex,
-        heightTex: dispTex,
-        uvScale: [1.0, 1.0], // Scale of the texture on the plane
-        normalMultiplier: 1,
-        heightMultiplier: 0.15, // Positive means Depth Map (white=deep). Negative means Height Map (white=high).
-        heightSamp: 32,      // Number of raymarch steps
-        heightOffset: 0    // Shifts where the surface starts
-      });
-
-      var matGlass = new Material("Glass",2,[1.0, 1.0, 1.0], 0.0, [0, 0, 0]);
-      var matBlueGlass = new Material("Blue Frosted Glass",2,[0.2, 0.2, 1.0], 1.0, [0, 0, 0]);
-      var matRedGlass = new Material("Red Glass",2,[1.0, 0.2, 0.2], 0.0, [0, 0, 0]);
-      var matUraniumGlass = new Material("Uranium Glass",2,[0.4, 1.0, 0.4], 0.0, [0, 0.01, 0]);
-
+      var matRedGlass = new Material("Red Glass",[1.0, 0.2, 0.2], 0.0, {transmission: 1.0});
+      
       scene.newPlane("Floor",matWhite, 0, 1, 0, 0);    // Floor (POM Textured)
-      // scene.newPlane("Ceiling",matWhite, 0, -1, 0, -3.5);   // Ceiling
-      // scene.newPlane("Back",matWhite, 0, 0, 1, -3.0);    // Back wall
-      // scene.newPlane("Front",matWhite, 0, 0, -1, -10.0);    // Front wall
-      // scene.newPlane("Left",matRed, 1, 0, 0, -2.5);      // Left wall
-      // scene.newPlane("Right",matGreen, -1, 0, 0, -2.5);   // Right wall
-      
       scene.newSphere("Light",matLight, 0, 3.5, 0, 0.5);
-      //scene.newSphere("Blue Ball",matBlueGlass, -1.6, 0.5, -1.4, 0.5);
-      //scene.newSphere("Glass Ball",matGlass, 0, 0, 0, 2);
 
-      // var bunnyMaterial = new Material("Bunny Material",0,[1.0, 1.0, 1.0], 0.5, [0, 0, 0], {
-      //   albedoTex: bunnyColor,
-      //   normalTex: bunnyNormal,
-      //   uvScale: [1.0, -1.0],
-      // });
-      
-      // var model = scene.newModel("Diamond",matDiamond,dragonModel);
-      //model.translate(0,1,0);
-
-      var matDiamond = new Material("Diamond Material",2,[1.0, 1.0, 1.0], 0.0, [0, 0, 0],{ior:2.4});
+      var matDiamond = new Material("Diamond Material", [1.0, 1.0, 1.0], 0.0, { ior:2.4, transmission: 1.0 });
       var model = scene.newModel("Diamond",matDiamond,diamondModel,false).translate(0,1,0);
       model.icon = "💎";
       model.collider = new ConvexCollider();
@@ -117,18 +64,6 @@ var SceneList = [
       }];
       scene.newModel("Rook",matRedGlass,rookModel,false).translate(-1,0,-1);
       
-      //var t = scene.newTorus("Torus",matRedGlass,0.5);
-      //t.translate(0,1,0);
-      //scene.newCylinder("Cylinder",matRedGlass).orient(-1.5,0,-1,0.2,-1.5,1,-1,0.2)
-
-      // var model2 = scene.newModel("Bunny",matCeramic,bunnyModel);
-      // model2.scaleMult(0.5,0.5,0.5);
-      // model2.translate(-1,0.5,1);
-
-      //let box = scene.newCube("Toy Box",toyBox, 0.2, 0.4, -0.2, 1.0, 1.2, 0.6);
-      //quat.setAxisAngle(box.rotation, [0, 1, 0], -20 * Math.PI / 180); 
-      //box.updateMatrix();
-
       scene.bounces = 10;
 
       return scene;
@@ -174,25 +109,24 @@ var SceneList = [
       dragonModel.generateBVH();
       //
 
-      var matWhite = new Material("White",0,[0.8, 0.8, 0.8], 1.0, [0, 0, 0]);
-      var matRed = new Material("Red",0,[0.8, 0.2, 0.2], 1.0, [0, 0, 0]);
-      var matGreen = new Material("Green",0,[0.2, 0.8, 0.2], 1.0, [0, 0, 0]);
-      var matCeramic = new Material("Ceramic",0,[0.9, 0.9, 0.9], 0.0, [0, 0, 0]);
-      var matMetal = new Material("Mirror",1,[0.8, 0.9, 0.8], 0.0, [0, 0, 0]);
-      var matLight = new Material("Light",0,[0.0, 0.0, 0.0], 1.0, [15, 15, 15]);
+      var matWhite = new Material("White",[0.8, 0.8, 0.8], 1.0);
+      var matRed = new Material("Red",[0.8, 0.2, 0.2], 1.0);
+      var matGreen = new Material("Green",[0.2, 0.8, 0.2], 1.0);
+      var matCeramic = new Material("Ceramic",[0.9, 0.9, 0.9], 0.0);
+      var matMetal = new Material("Mirror",[0.8, 0.9, 0.8], 0.0, {metallic:1});
+      var matLight = new Material("Light",[0.0, 0.0, 0.0], 1.0, {emissionIntensity: 15});
 
-      var matGlass = new Material("Glass",2,[1.0, 1.0, 1.0], 0.0, [0, 0, 0]);
-      var matBlueGlass = new Material("Blue Frosted Glass",2,[0.2, 0.2, 1.0], 1.0, [0, 0, 0]);
-      var matRedGlass = new Material("Red Glass",2,[1.0, 0.2, 0.2], 0.0, [0, 0, 0]);
-      var matUraniumGlass = new Material("Uranium Glass",2,[0.4, 1.0, 0.4], 0.0, [0, 0.01, 0]);
-
+      var matGlass = new Material("Glass",[1.0, 1.0, 1.0], 0.0, {transmission: 1.0});
+      var matBlueGlass = new Material("Blue Frosted Glass",[0.2, 0.2, 1.0], 1.0, {transmission: 1.0});
+      var matRedGlass = new Material("Red Glass",[1.0, 0.2, 0.2], 0.0, {transmission: 1.0});
+      
       scene.newPlane("Floor",matCeramic, 0, 1, 0, 0);    // Floor (POM Textured)
       scene.newPlane("Ceiling",matWhite, 0, -1, 0, -3.5);   // Ceiling
       scene.newPlane("Back",matMetal, 0, 0, 1, -3.0);    // Back wall
       scene.newPlane("Front",matMetal, 0, 0, -1, -10.0);    // Front wall
       scene.newPlane("Left",matRed, 1, 0, 0, -2.5);      // Left wall
       scene.newPlane("Right",matGreen, -1, 0, 0, -2.5);   // Right wall
-      
+
       scene.newSphere("Light",matLight, 0, 3.5, 0, 0.5);
       //scene.newSphere("Blue Ball",matBlueGlass, -1.6, 0.5, -1.4, 0.5);
       //scene.newSphere("Glass Ball",matGlass, 0, 0, 0, 2);
@@ -236,11 +170,11 @@ var SceneList = [
       diamondModel.renormalize(true);
       diamondModel.generateBVH();
 
-      var matGold = new Material("Gold", 1, [1.0, 0.8, 0.3], 0.05, [0, 0, 0]);
-      var matDiamond = new Material("Diamond", 2, [1.0, 1.0, 1.0], 0.0, [0, 0, 0], { ior: 2.4 });
-      var matGlass = new Material("Glass", 2, [0.9, 1.0, 0.9], 0.0, [0, 0, 0], { ior: 1.5 });
-      var matFloor = new Material("Floor", 0, [0.1, 0.1, 0.1], 0.2, [0, 0, 0]); // Dark glossy floor
-      var matLight = new Material("Light", 0, [0,0,0], 1, [20, 18, 15]);
+      var matGold = new Material("Gold", [1.0, 0.8, 0.3], 0.05, { metallic: 1.0 });
+      var matDiamond = new Material("Diamond", [1.0, 1.0, 1.0], 0.0, { transmission: 1.0, ior: 2.4 });
+      var matGlass = new Material("Glass", [0.9, 1.0, 0.9], 0.0, { transmission: 1.0, ior: 1.5 });
+      var matFloor = new Material("Floor", [0.1, 0.1, 0.1], 0.2); // Dark glossy floor
+      var matLight = new Material("Light", [0,0,0], 1, { emittance: [1, 0.9, 0.75], emissionIntensity: 20 });
 
       // Lights
       scene.newSphere("Top Light",matLight, 0, 5, 0, 0.5); // Top light
@@ -293,8 +227,8 @@ var SceneList = [
       diamondModel.generateBVH();
 
       // 1. Setup Materials
-      var matGround = new Material("Ground Material", 0, [0.1, 0.1, 0.1], 1.0, [0, 0, 0]); // Dark glossy floor
-      var matLight = new Material("Light Material", 0, [0, 0, 0], 1, [15, 15, 15]);     // Overheard light
+      var matGround = new Material("Ground Material", [0.1, 0.1, 0.1], 1.0); // Dark glossy floor
+      var matLight = new Material("Light Material", [0, 0, 0], 1, { emissionIntensity: 15 });     // Overheard light
       
       // A function to get a random colorful material
       var index = 0;
@@ -304,17 +238,27 @@ var SceneList = [
           const r = rng()*19+1;
           const g = rng()*19+1;
           const b = rng()*19+1;
-          return new Material("Emissive "+index, 0, [0, 0, 0], 1.0, [r, g, b]);
+          return new Material("Emissive "+index, [0, 0, 0], 1.0, { emittance: [r, g, b], emissionIntensity: 1.0 });
         }
         const types = [0, 1, 2]; // Diffuse, Metal, Glass
         const type = types[Math.floor(rng() * types.length)];
         const color = [rng(), rng(), rng()];
         const roughness = type != 0 && rng() < 0.3 ? 0 : rng();
-        return new Material("Material "+index, type, color, roughness, [0, 0, 0]);
+        if (type == 0) {
+          return new Material("Material "+index, color, roughness);
+        } else if (type == 1) {
+          return new Material("Material "+index, color, roughness, {
+            metallic: 1.0,
+          });
+        } else if (type == 2) {
+          return new Material("Material "+index, color, roughness, {
+            transmission: 1.0,
+          });
+        }
       }
 
       // 2. Add Environment
-      scene.newPlane("Ground",matGround, 0, 1, 0, 0); // Ground
+      scene.newPlane("Ground", matGround, 0, 1, 0, 0); // Ground
       //scene.newSphere(matLight, 0, 10, 0, 1); // Sun/Light source
       
       // 3. Generate Non-Intersecting Spheres
@@ -372,13 +316,12 @@ var SceneList = [
         }
       }
 
-      var heavyMat = new Material("Heavy",0,[0.8,0.8,0.8],1,[0,0,0],{
+      var heavyMat = new Material("Heavy", [0.8,0.8,0.8], 1, {
         density: 50,
       });
-      var heavyBall = scene.newSphere("Heavy Ball",heavyMat,0,1,-11,1);
+      var heavyBall = scene.newSphere("Heavy Ball", heavyMat, 0, 1, -11, 1);
       heavyBall.velocity[2] = 30;
       heavyBall.angularVelocity[0] = 30;
-
 
       //scene.newModel(matGround,diamondModel,true);
 
@@ -426,8 +369,8 @@ var SceneList = [
       bunnyModel.renormalize();
       bunnyModel.generateBVH();
 
-      var matWhite = new Material("White",0,[0.8, 0.8, 0.8], 1.0, [0, 0, 0]);
-      var matLight = new Material("Light",0,[0.0, 0.0, 0.0], 1.0, [15, 15, 15]);
+      var matWhite = new Material("White",[0.8, 0.8, 0.8], 1.0);
+      var matLight = new Material("Light",[0.0, 0.0, 0.0], 1.0, {emissionIntensity: 15});
 
       // Set up the robust POM material!
       // var toyBox = new Material("Toy Box",0,[1.0, 1.0, 1.0], 0.5, [0, 0, 0], {
@@ -444,7 +387,7 @@ var SceneList = [
       scene.newPlane("Floor",matWhite, 0, 1, 0, 0);    // Floor (POM Textured)
       scene.newSphere("Light",matLight, 0, 3.5, 0, 0.5);
 
-      var bunnyMaterial = new Material("Bunny Material",0,[1.0, 1.0, 1.0], 0.5, [0, 0, 0], {
+      var bunnyMaterial = new Material("Bunny Material",[1.0, 1.0, 1.0], 0.5, {
         albedoTex: bunnyColor,
         normalTex: bunnyNormal,
         roughnessTex: bunnyRoughness,
@@ -464,6 +407,24 @@ var SceneList = [
       return scene;
     }
   },
+  // {
+  //   name: "Material Test",
+  //   load: async function() {},
+  //   create: async function(canvas) {
+  //     canvas.width = 512;
+  //     canvas.height = 512;
+
+  //     const loader = new GLBLoader();
+  //     var scene = new Scene(canvas);
+
+  //     const { models } = await loader.load('assets/material_ball.glb');
+  //     models[0].bakeTransform(mat4.fromRotation(mat4.create(), -Math.PI / 2, [1, 0, 0]));
+  //     models[0].renormalize(true);
+  //     models[0].generateBVH();
+      
+  //     scene.objects = scene.objects.concat(models);
+  //   },
+  // }
 ];
 
 function mulberry32(a) {
@@ -511,7 +472,7 @@ async function loadScene() {
     var max = Math.max(...m.emittance);
     if (max < 1) return;
     m.emittance = m.emittance.map(v=>v/max);
-    m.emissionIntensity = max;
+    m.emissionIntensity *= max;
   });
   State.assets = State.assets.concat(materials);
   State.assets = State.assets.concat(scene.getTextures());

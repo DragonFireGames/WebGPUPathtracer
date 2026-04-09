@@ -53,7 +53,7 @@ function createCheckerboardDataURL(size = 256, squares = 8, color1 = '#ffffff', 
   return canvas.toDataURL();
 }
 
-const defaultMaterial = new Material("Default Material",0,[1,1,1],1,[0,0,0]);
+const defaultMaterial = new Material("Default Material",[1,1,1],1);
 defaultMaterial.name = "Default Material";
 defaultMaterial.albedoTex = new Texture(createCheckerboardDataURL(64,2,"#ff00ff","#000"), "Checkerboard");
 var renderCanvas = document.createElement('canvas');
@@ -290,7 +290,6 @@ const vs = `#version 300 es
     gl_Position = u_mvp * vec4(a_pos, 1.0); 
   }`;
 
-
 const fs = `#version 300 es
   precision highp float;
 
@@ -300,55 +299,53 @@ const fs = `#version 300 es
   in vec3 v_viewDir;
 
   uniform vec4 u_color; 
-  uniform vec3 u_emittance; 
+  uniform float u_metallic;
   uniform float u_roughness;
   uniform float u_ior;
-  uniform float u_concentration;
-  uniform int u_type; // 0: Opaque, 1: Metal, 2: Glass
-  uniform int u_mode; 
   
+  uniform float u_specularTint;
+  uniform float u_anisotropic;
+  uniform float u_anisotropicRotation;
+  uniform float u_sheen;
+  uniform float u_sheenTint;
+  uniform float u_clearcoat;
+  uniform float u_clearcoatGloss;
+  uniform float u_clearcoatIor;
+  uniform float u_transmission;
+  uniform float u_concentration;
+  
+  uniform float u_subsurface;
+  uniform vec3 u_subsurfaceTint;
+  uniform vec3 u_emittance; 
+
   uniform sampler2D u_albedoTex;
   uniform sampler2D u_normalTex;
   uniform sampler2D u_roughnessTex;
+  uniform sampler2D u_metallicTex;
+  uniform sampler2D u_emissiveTex;
+  
   uniform bool u_hasAlbedo;
   uniform bool u_hasNormal;
   uniform bool u_hasRoughness;
+  uniform bool u_hasMetallic;
+  uniform bool u_hasEmissive;
+
   uniform vec2 u_uvScale; 
   uniform float u_normalMultiplier;
+  uniform int u_mode;
 
   out vec4 outColor;
 
-  // Full Fresnel Equation (Converted from your WGSL)
-  float fresnel(vec3 I, vec3 N, float ior1, float ior2) {
-    float cosi = clamp(dot(I, N), -1.0, 1.0);
-    float etai = ior1;
-    float etat = ior2;
-
-    if (cosi > 0.0) {
-      etai = ior2;
-      etat = ior1;
-    }
-
-    float sint = (etai / etat) * sqrt(max(0.0, 1.0 - cosi * cosi));
-
-    if (sint >= 1.0) {
-      return 1.0; // Total Internal Reflection
-    } else {
-      float cost = sqrt(max(0.0, 1.0 - sint * sint));
-      float abs_cosi = abs(cosi);
-      
-      float Rs = ((etat * abs_cosi) - (etai * cost)) / ((etat * abs_cosi) + (etai * cost));
-      float Rp = ((etai * abs_cosi) - (etat * cost)) / ((etai * abs_cosi) + (etat * cost));
-      
-      return (Rs * Rs + Rp * Rp) / 2.0;
-    }
+  // Fresnel with Roughness compensation
+  vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
   }
 
   vec3 sampleSky(vec3 dir, float roughness) {
     float t = 0.5 * (dir.y + 1.0);
-    vec3 skyColor = mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t);
-    float sun = pow(max(0.0, dot(dir, normalize(vec3(1.0, 1.0, 1.0)))), mix(64.0, 2.0, sqrt(roughness)));
-    return skyColor + sun * 3.0;
+    vec3 skyColor = mix(vec3(0.05), vec3(0.5, 0.7, 1.0), t);
+    float sun = pow(max(0.0, dot(dir, normalize(vec3(1, 1, 1)))), mix(128.0, 2.0, roughness));
+    return skyColor + sun * 4.0;
   }
 
   vec3 getNormal(vec2 uv) {
@@ -365,77 +362,100 @@ const fs = `#version 300 es
   }
 
   void main() {
-    if (u_mode == 1) {
-      outColor = u_color;
-      return;
-    }
+    if (u_mode == 1) { outColor = u_color; return; }
 
     vec2 uv = v_uv * u_uvScale;
     vec3 N = u_hasNormal ? getNormal(uv) : normalize(v_norm);
+    vec3 SN = normalize(v_norm);
     vec3 V = normalize(v_viewDir);
-    vec3 R = reflect(-V, N);
+    float dotNV = min(abs(dot(N, V)), 1.0);
+    float dotSNV = min(abs(dot(SN, V)), 1.0);
     
+    // TBN for Anisotropy
+    vec3 up = abs(N.y) < 0.99999 ? vec3(0,1,0) : vec3(0,0,1);
+    vec3 T = normalize(cross(up, N));
+    vec3 B = cross(N, T);
+    // Rotate Tangents
+    float angle = u_anisotropicRotation * 6.28318;
+    T = T * cos(angle) + B * sin(angle);
+    B = cross(N, T);
+
     vec3 albedo = pow(u_color.rgb, vec3(2.2));
     if (u_hasAlbedo) albedo *= pow(texture(u_albedoTex, uv).rgb, vec3(2.2));
-
     float roughness = u_roughness;
-    if (u_hasRoughness) roughness *= texture(u_roughnessTex, uv).r;
+    if (u_hasRoughness) roughness *= texture(u_roughnessTex, uv).g;
+    float metallic = u_metallic;
+    if (u_hasMetallic) metallic *= texture(u_metallicTex, uv).b;
 
-    float F = 0.;
-    if (u_type == 2) {
-      // Use full Fresnel instead of Schlick
-      F = fresnel(-V, dot(N, V) > 0. ? N : -N, 1.0, u_ior);
-    } else {
-      float cosTheta = abs(dot(N, V));
-      // Fresnel Schlick
-      float F0 = abs((1.0 - u_ior) / (1.0 + u_ior));
-      F0 = F0 * F0;
-      F = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
-    }
+    // F0 calculation
+    float f0_dielectric = pow((1.0 - u_ior) / (1.0 + u_ior), 2.0);
+    vec3 f0 = mix(vec3(f0_dielectric), albedo, metallic);
+    f0 = mix(f0, f0 * albedo, u_specularTint);
+    
+    // 1. ANISOTROPIC REFLECTION
+    // We stretch the reflection vector based on anisotropy
+    vec3 aniso_dir = mix(N, cross(cross(V, T), T), u_anisotropic);
+    vec3 R = reflect(-V, normalize(mix(N, aniso_dir, u_anisotropic)));
+    
+    // Fresnel with Roughness Bias (Fixes the "bright edge" on rough objects)
+    vec3 F = fresnelSchlickRoughness(dotNV, f0, roughness);
 
     vec3 finalColor = vec3(0.0);
     float alpha = u_color.a;
 
-    if (u_type == 2) { // GLASS
-      // Beer's Law Thickness Proxy
-      float thickness = max(0.0, dot(N, V)) * 2.0;
-      vec3 sigma = -log(max(albedo, vec3(0.01))) * u_concentration;
-      vec3 transmissionFactor = exp(-sigma * thickness);
-      
-      // Separate Transmission and Reflection
-      vec3 refractDir = refract(-V, N, 1.0 / u_ior);
-      vec3 transmission = sampleSky(refractDir,roughness) * transmissionFactor;
-      vec3 reflection = sampleSky(R,roughness);
-      
-      // Combine based on Fresnel
-      finalColor = mix(transmission, reflection, F);
-
-      // Alpha depends on internal absorption + surface reflection
-      float avgTrans = (transmissionFactor.r + transmissionFactor.g + transmissionFactor.b) / 3.0;
-      alpha = mix(1.0 - avgTrans, 1.0, F);
-
-      // Add Additive Specular (so highlights don't vanish)
-      float spec = pow(max(0.0, dot(R, normalize(vec3(1.0, 1.0, 1.0)))), mix(64.0, 2.0, sqrt(roughness)));
-      alpha += spec;
-    } 
-    else if (u_type == 1) { // METAL
-      finalColor = sampleSky(R,roughness) * albedo;
-    } 
-    else { // OPAQUE / PLASTIC
-      float diffuseInt = max(0.0, dot(N, normalize(vec3(1, 2, 3))));
-      vec3 diffuse = albedo * (diffuseInt + 0.05);
-      finalColor = mix(diffuse, sampleSky(R,roughness), F * (1.0 - roughness));
-      float spec = pow(max(0.0, dot(R, normalize(vec3(1.0, 1.0, 1.0)))), mix(64.0, 2.0, sqrt(roughness)));
-      finalColor += mix(vec3(1), albedo, roughness) * spec;
+    // Transmission (Your Beer's Law Logic)
+    float thickness = max(0.0, dotNV) * 2.0;
+    vec3 sigma = -log(max(u_color.rgb, vec3(0.01))) * u_concentration;
+    vec3 transmissionFactor = exp(-sigma * thickness);
+    vec3 refractDir = refract(-V, N, 1.0 / u_ior);
+    vec3 transLight = sampleSky(refractDir, roughness) * transmissionFactor;
+    vec3 reflLight = sampleSky(R, roughness);
+    vec3 transmissionColor = mix(transLight, reflLight, F) * 2.;
+    float avgTrans = (transmissionFactor.r + transmissionFactor.g + transmissionFactor.b) / 3.0;
+    alpha = mix(1.0 - avgTrans, 1.0, F.r); 
+  
+    // Opaque / Metal
+    vec3 specEnv = sampleSky(R, roughness) * F;
+    vec3 diffEnv = albedo * sampleSky(N, 1.0) * (1.0 - F) * (1.0 - metallic);
+    
+    // SUBSURFACE (Wrapped light with Scatter Tint)
+    if (u_subsurface > 0.0 && metallic < 0.1) {
+      vec3 L = normalize(vec3(1,1,1));
+      float w = 0.5; // wrap
+      float sss_diff = max(0.0, (dot(N, L) + w) / ((1.0+w)*(1.0+w)));
+      vec3 sss_color = pow(u_subsurfaceTint, vec3(2.2)) * sss_diff;
+      diffEnv = mix(diffEnv, sss_color, u_subsurface);
     }
 
-    finalColor += u_emittance;
+    vec3 opaqueColor = diffEnv + specEnv;
+    alpha = mix(alpha, 1.0, metallic);
 
-    // Tone Map & Gamma
-    finalColor = finalColor / (finalColor + vec3(1.0));
-    finalColor = pow(finalColor, vec3(1.0/2.2));
+    // SHEEN (Velvet / Cloth grazing)
+    if (u_sheen > 0.0) {
+      float sheenFres = pow(1.0 - dotNV, 3.0);
+      vec3 sheenColor = mix(vec3(1.0), albedo, u_sheenTint);
+      opaqueColor += sheenColor * sheenFres * u_sheen;
+    }
 
-    outColor = vec4(finalColor, alpha);
+    finalColor = mix(opaqueColor,transmissionColor,u_transmission);
+    alpha = mix(1.0,alpha,u_transmission);
+
+    // 2. CLEAR COAT (Applied on Top)
+    if (u_clearcoat > 0.0) {
+      float ccF0 = pow((1.0 - u_clearcoatIor) / (1.0 + u_clearcoatIor), 2.0);
+      float Fcc = ccF0 + (1.0 - ccF0) * pow(1.0 - dotSNV, 5.0);
+      vec3 ccR = reflect(-V, SN);
+      vec3 ccEnv = sampleSky(ccR, 1.0 - u_clearcoatGloss) * 2.5;
+      finalColor = finalColor * (1.0 - Fcc * u_clearcoat) + (ccEnv * Fcc * u_clearcoat);
+    }
+
+    // 3. EMISSION
+    vec3 emissive = u_emittance;
+    if (u_hasEmissive) emissive *= pow(texture(u_emissiveTex, uv).rgb, vec3(2.2));
+    finalColor += emissive;
+
+    finalColor = finalColor / (finalColor + vec3(1.0)); // Tone Mapping
+    outColor = vec4(pow(finalColor, vec3(1.0/2.2)), alpha);
   }
 `;
 
@@ -475,27 +495,46 @@ const locs = {
   mvp: gl.getUniformLocation(prog, "u_mvp"),
   model: gl.getUniformLocation(prog, "u_model"),
   mode: gl.getUniformLocation(prog, "u_mode"),
+  camPos: gl.getUniformLocation(prog, "u_camPos"),
+  
   color: gl.getUniformLocation(prog, "u_color"),
-  emittance: gl.getUniformLocation(prog, "u_emittance"),
-  type: gl.getUniformLocation(prog, "u_type"),
+  metallic: gl.getUniformLocation(prog, "u_metallic"),
   roughness: gl.getUniformLocation(prog, "u_roughness"),
   ior: gl.getUniformLocation(prog, "u_ior"),
+  
+  specularTint: gl.getUniformLocation(prog, "u_specularTint"),
+  anisotropic: gl.getUniformLocation(prog, "u_anisotropic"),
+  anisotropicRotation: gl.getUniformLocation(prog, "u_anisotropicRotation"),
+  sheen: gl.getUniformLocation(prog, "u_sheen"),
+  sheenTint: gl.getUniformLocation(prog, "u_sheenTint"),
+  clearcoat: gl.getUniformLocation(prog, "u_clearcoat"),
+  clearcoatGloss: gl.getUniformLocation(prog, "u_clearcoatGloss"),
+  clearcoatIor: gl.getUniformLocation(prog, "u_clearcoatIor"),
+  transmission: gl.getUniformLocation(prog, "u_transmission"),
   concentration: gl.getUniformLocation(prog, "u_concentration"),
-  camPos: gl.getUniformLocation(prog, "u_camPos"),
-  hasAlbedo: gl.getUniformLocation(prog, "u_hasAlbedo"),
-  hasNormal: gl.getUniformLocation(prog, "u_hasNormal"),
-  hasRoughness: gl.getUniformLocation(prog, "u_hasRoughness"),
+  
+  subsurface: gl.getUniformLocation(prog, "u_subsurface"),
+  subsurfaceTint: gl.getUniformLocation(prog, "u_subsurfaceTint"),
+  emittance: gl.getUniformLocation(prog, "u_emittance"),
+
   albedoTex: gl.getUniformLocation(prog, "u_albedoTex"),
   normalTex: gl.getUniformLocation(prog, "u_normalTex"),
   roughnessTex: gl.getUniformLocation(prog, "u_roughnessTex"),
+  metallicTex: gl.getUniformLocation(prog, "u_metallicTex"),
+  emissiveTex: gl.getUniformLocation(prog, "u_emissiveTex"),
+
+  hasAlbedo: gl.getUniformLocation(prog, "u_hasAlbedo"),
+  hasNormal: gl.getUniformLocation(prog, "u_hasNormal"),
+  hasRoughness: gl.getUniformLocation(prog, "u_hasRoughness"),
+  hasMetallic: gl.getUniformLocation(prog, "u_hasMetallic"),
+  hasEmissive: gl.getUniformLocation(prog, "u_hasEmissive"),
+  
   uvScale: gl.getUniformLocation(prog, "u_uvScale"),
   normalMultiplier: gl.getUniformLocation(prog, "u_normalMultiplier")
 };
-
 function setMaterialUniforms(mat) {
   if (!mat) return;
 
-  // 1. Texture Slots
   const bindTex = (loc, hasLoc, tex, unit) => {
     let active = false;
     if (tex) {
@@ -511,22 +550,33 @@ function setMaterialUniforms(mat) {
   bindTex(locs.albedoTex, locs.hasAlbedo, mat.albedoTex, 0);
   bindTex(locs.normalTex, locs.hasNormal, mat.normalTex, 1);
   bindTex(locs.roughnessTex, locs.hasRoughness, mat.roughnessTex, 2);
-  gl.uniform2fv(locs.uvScale, mat.uvScale);
+  bindTex(locs.metallicTex, locs.hasMetallic, mat.metallicTex, 3);
+  bindTex(locs.emissiveTex, locs.hasEmissive, mat.emissiveTex, 4);
 
-  // 2. Physical Properties
-  gl.uniform4fv(locs.color, [...(mat.color || [0.8, 0.8, 0.8]), 1.0]);
-  gl.uniform3fv(locs.emittance, (mat.emittance || [0,0,0]).map(v => v * (mat.emissionIntensity || 0)));
+  gl.uniform4fv(locs.color, [...mat.color, 1.0]);
+  gl.uniform1f(locs.metallic, mat.metallic || 0);
+  gl.uniform1f(locs.roughness, mat.roughness || 0);
+  gl.uniform1f(locs.ior, mat.ior || 1.5);
   
-  // Mapping raytracer types to shader ints
-  // 0: Opaque, 1: Metal, 2: Dielectric
-  gl.uniform1i(locs.type, mat.type || 0);
-  gl.uniform1f(locs.roughness, mat.roughness || 0.0);
-  gl.uniform1f(locs.ior, mat.ior || 1.45);
-  gl.uniform1f(locs.concentration, mat.concentration || 1);
+  gl.uniform1f(locs.specularTint, mat.specularTint || 0);
+  gl.uniform1f(locs.anisotropic, mat.anisotropic || 0);
+  gl.uniform1f(locs.anisotropicRotation, mat.anisotropicRotation || 0);
+  gl.uniform1f(locs.sheen, mat.sheen || 0);
+  gl.uniform1f(locs.sheenTint, mat.sheenTint || 0);
+  
+  gl.uniform1f(locs.clearcoat, mat.clearcoat || 0);
+  gl.uniform1f(locs.clearcoatGloss, mat.clearcoatGloss !== undefined ? mat.clearcoatGloss : 1);
+  gl.uniform1f(locs.clearcoatIor, mat.clearcoatIor || 1.5);
+  gl.uniform1f(locs.transmission, mat.transmission || 0);
+  gl.uniform1f(locs.concentration, mat.concentration !== undefined ? mat.concentration : 1);
+  
+  gl.uniform1f(locs.subsurface, mat.subsurface || 0);
+  gl.uniform3fv(locs.subsurfaceTint, mat.subsurfaceTint || mat.color);
+  gl.uniform3fv(locs.emittance, (mat.emittance || [0,0,0]).map(v => v * (mat.emissionIntensity || 0)));
 
+  gl.uniform2fv(locs.uvScale, mat.uvScale || [1, 1]);
   gl.uniform1f(locs.normalMultiplier, mat.normalMultiplier || 1);
 }
-
 // Modified slightly to return buffers so we can delete them later
 window.createVAOWithBuffers = (p, n, i, u) => {
   const vao = gl.createVertexArray(); 
@@ -624,7 +674,7 @@ function drawScene(objects,vp) {
   // 1. Bucket objects by material type
   objects.forEach(obj => {
     // material_type 2 is Dielectric (Glass)
-    const isTransparent = obj.material.type === 2;
+    const isTransparent = obj.material.transmission !== 0;
     if (isTransparent) {
       // Calculate distance for sorting
       // We use squared distance to avoid expensive Math.sqrt calls
@@ -879,7 +929,7 @@ function generateMaterialPreview(material, size = 256) {
   material.urlData = url;
   return url;
 }
-var previewMaterial = new Material("Preview Material",0,[0.6,0.6,0.6],0.5,[0,0,0]);
+var previewMaterial = new Material("Preview Material",[0.6,0.6,0.6],0.5);
 function generateModelPreview(modeldata, size = 256) {
   const modelObj = new Model("",previewMaterial,modeldata);
   if (!modelObj.veoData) modelObj.updateGeo();
@@ -958,8 +1008,8 @@ const createAssetSlot = (guiFolder, label, assetType, assetParent, assetPath) =>
     const id = e.dataTransfer.getData('assetId');
     const asset = State.assets.find(a => a.id === id);
     if (asset && asset instanceof assetType) { 
-      if (slot.changeListener) slot.changeListener();
       assetParent[assetPath] = asset;
+      if (slot.changeListener) slot.changeListener();
       renderInspector();
     }
     slot.classList.remove('drag-over');
@@ -967,7 +1017,7 @@ const createAssetSlot = (guiFolder, label, assetType, assetParent, assetPath) =>
   slot.onclick = e => {
     if (assetParent[assetPath]) selectAsset(assetParent[assetPath]);
   }
-  guiFolder.domElement.appendChild(slot);
+  guiFolder.domElement.children[1].appendChild(slot);
   slot.onChange = e => slot.changeListener = e;
   return slot;
 };
@@ -1017,9 +1067,10 @@ const renderInspector = () => {
     }
 
     const m = gui.addFolder('Material');
-    var mslot = createAssetSlot(m, "None (Default) - Drop Material", Material, n, 'material');
+    var mslot;
     n.removeMaterial = ()=>{ n.material = defaultMaterial; mslot.textContent = "None (Default) - Drop Material"; }
     m.add(n, 'removeMaterial').name('Remove Material');
+    mslot = createAssetSlot(m, "None (Default) - Drop Material", Material, n, 'material');
 
     const ph = gui.addFolder('Physics Properties');
     const v = ph.addFolder('Velocity'); v.add(n.velocity, 0).name('X').listen(); v.add(n.velocity, 1).name('Y').listen(); v.add(n.velocity, 2).name('Z').listen();
@@ -1060,47 +1111,66 @@ const renderInspector = () => {
       gui.add(a, 'sphericalUVs').name('Calculate Spherical UVs').onChange(updateModel);
     }
     if (a instanceof Material) {
-      var updateMat = ()=>{ generateMaterialPreview(a); img.src = renderPreview(a,256); renderAssets(); }
-      gui.add(a,'type',{"Plastic":0,"Metal":1,"Glass":2}).name('Type').onChange(updateMat);
+      var updateMat = () => { generateMaterialPreview(a); img.src = renderPreview(a, 256); renderAssets(); }
+
+      gui.addColor(a, 'color').name('Base Color').onChange(updateMat);
       gui.add(a, 'roughness', 0, 1).name('Roughness').onChange(updateMat);
-      gui.addColor(a, 'color').name('Albedo').onChange(updateMat);
-      gui.addColor(a, 'emittance').name('Emittance').onChange(updateMat);
-      gui.add(a, 'emissionIntensity').name('Emission Intensity').onChange(updateMat);
-      gui.add(a, 'ior').name('Index of Refraction').onChange(updateMat);
-      gui.add(a, 'concentration').name('Concentration').onChange(updateMat);
+      gui.add(a, 'metallic', 0, 1).name('Metallic').onChange(updateMat);
+      gui.add(a, 'ior', 1, 2.5).name('IOR').onChange(updateMat);
 
-      const ph = gui.addFolder('Physics Properties');
-      ph.add(a,'density').name('Density');
-      ph.add(a,'friction',0,1).name('Friction');
-      ph.add(a,'restitution',0,1).name('Bounciness');
+      const disp = gui.addFolder('Disney Layers');
+      disp.add(a, 'specularTint', 0, 1).name('Specular Tint').onChange(updateMat);
+      //disp.add(a, 'anisotropic', 0, 1).name('Anisotropic').onChange(updateMat);
+      //disp.add(a, 'anisotropicRotation', 0, 1).name('Aniso Rotation').onChange(updateMat);
+      //disp.add(a, 'sheen', 0, 1).name('Sheen').onChange(updateMat);
+      //disp.add(a, 'sheenTint', 0, 1).name('Sheen Tint').onChange(updateMat);
+      
+      const coat = disp.addFolder('Clear Coat');
+      coat.add(a, 'clearcoat', 0, 1).name('Strength').onChange(updateMat);
+      coat.add(a, 'clearcoatGloss', 0, 1).name('Gloss').onChange(updateMat);
+      coat.add(a, 'clearcoatIor', 1, 2.5).name('Coat IOR').onChange(updateMat);
 
-      const tp = gui.addFolder('Texture Parameters');
-      tp.add(a.uvScale,'0').name("UV Scale X").onChange(updateMat);
-      tp.add(a.uvScale,'1').name("UV Scale Y").onChange(updateMat);
+      const refr = gui.addFolder('Transmission & SSS');
+      refr.add(a, 'transmission', 0, 1).name('Transmission').onChange(updateMat);
+      refr.add(a, 'concentration', 0, 20).name('Concentration').onChange(updateMat);
+      // refr.add(a, 'subsurface', 0, 1).name('Subsurface').onChange(updateMat);
+      // refr.addColor(a, 'subsurfaceTint').name('SSS Tint').onChange(updateMat);
+      
+      const emis = gui.addFolder('Emission');
+      emis.addColor(a, 'emittance').name('Color').onChange(updateMat);
+      emis.add(a, 'emissionIntensity', 0, 100).name('Intensity').onChange(updateMat);
 
-      const at = gui.addFolder('Albedo Texture');
-      var aslot = createAssetSlot(at, "Drop Texture Here", Texture, a, 'albedoTex').onChange(updateMat);
-      a.removeAlbedoTex = ()=>{ a.albedoTex = null; aslot.textContent = "Drop Texture Here"; }
-      at.add(a, 'removeAlbedoTex').name('Remove Texture').onChange(updateMat);
+      const tex = gui.addFolder('Textures');
+      tex.add(a.uvScale, '0').name("UV Scale X").onChange(updateMat);
+      tex.add(a.uvScale, '1').name("UV Scale Y").onChange(updateMat);
 
-      const nt = gui.addFolder('Normal Texture');
-      nt.add(a,'normalMultiplier').name('Multiplier').onChange(updateMat);
-      var nslot = createAssetSlot(nt, "Drop Texture Here", Texture, a, 'normalTex').onChange(updateMat);
-      a.removeNormalTex = ()=>{ a.normalTex = null; nslot.textContent = "Drop Texture Here"; }
-      nt.add(a, 'removeNormalTex').name('Remove Texture').onChange(updateMat);
+      const maps = [
+        { name: 'Emission Map', prop: 'emissiveTex', folder: emis },
+        { name: 'Albedo', prop: 'albedoTex', folder: tex.addFolder('Albedo') },
+        { name: 'Normal', prop: 'normalTex', folder: tex.addFolder('Normal'), extra: (nt)=>{
+          nt.add(a, 'normalMultiplier').name('Multiplier').onChange(updateMat);
+        }},
+        { name: 'Roughness', prop: 'roughnessTex', folder: tex.addFolder('Roughness') },
+        { name: 'Metallic', prop: 'metallicTex', folder: tex.addFolder('Metallic') },
+        { name: 'Height / POM', prop: 'heightTex', folder: tex.addFolder('Height / POM'), extra: (ht)=>{
+          ht.add(a, 'heightMultiplier').name('Depth');
+          ht.add(a, 'heightSamp', 1, 64, 1).name('Samples');
+          ht.add(a, 'heightOffset').name('Offset');
+        }}
+      ];
 
-      const ht = gui.addFolder('Height Map');
-      ht.add(a,'heightMultiplier').name('Multiplier');
-      ht.add(a,'heightSamp').name('Samples',1,32,1);
-      ht.add(a,'heightOffset').name('Offset');
-      var hslot = createAssetSlot(ht, "Drop Texture Here", Texture, a, 'heightTex');
-      a.removeHeightTex = ()=>{ a.heightTex = null; hslot.textContent = "Drop Texture Here"; }
-      ht.add(a, 'removeHeightTex').name('Remove Texture');
+      maps.forEach(m => {
+        if (m.extra) m.extra(m.folder);
+        var slot;
+        a['remove' + m.prop] = () => { a[m.prop] = null; slot.textContent = "Drop " + m.name; updateMat(); };
+        m.folder.add(a, 'remove' + m.prop).name('Remove');
+        slot = createAssetSlot(m.folder, "Drop " + m.name, Texture, a, m.prop).onChange(updateMat);
+      });
 
-      const rt = gui.addFolder('Roughness Texture');
-      var rslot = createAssetSlot(rt, "Drop Texture Here", Texture, a, 'roughnessTex').onChange(updateMat);
-      a.removeRoughnessTex = ()=>{ a.roughnessTex = null; rslot.textContent = "Drop Texture Here"; }
-      rt.add(a, 'removeRoughnessTex').name('Remove Texture').onChange(updateMat);
+      const ph = gui.addFolder('Physics');
+      ph.add(a, 'density').name('Density');
+      ph.add(a, 'friction', 0, 1).name('Friction');
+      ph.add(a, 'restitution', 0, 1).name('Bounciness');
     }
   }
 };
@@ -1126,9 +1196,10 @@ const renderSceneInspector = () => {
   bg.addColor(a,'backgroundColor').name("Color");
   bg.add(a,'backgroundIntensity').name("Intensity");
   const bgt = gui.addFolder('Background Texture');
-  var bslot = createAssetSlot(bgt, "Drop HDR Texture Here", HDRTexture, a, 'background');
+  var bslot;
   a.removeBackground = ()=>{ a.background = null; bslot.textContent = "Drop HDR Texture Here"; }
   bgt.add(a, 'removeBackground').name('Remove Texture');
+  bslot = createAssetSlot(bgt, "Drop HDR Texture Here", HDRTexture, a, 'background');
 }
 // Canvas Drop for Models & Materials
 gl_canvas.ondragover = e => e.preventDefault();
@@ -1176,10 +1247,184 @@ document.getElementById('primitiveSelect').oninput = (e) => {
 };
 
 window.createMaterial = (color) => {
-  const mat = new Material("Material "+(State.assets.length+1),0,color||[1,1,1],0.5,[0,0,0]);
+  const mat = new Material("Material "+(State.assets.length+1),color||[1,1,1],0.5);
   State.assets.push(mat); renderAssets(); selectAsset(mat);
   return mat;
 };
+class GLBLoader {
+  async load(url) {
+    const response = await fetch(url);
+    const arrayBuffer = await response.arrayBuffer();
+    
+    // Validate GLB Header
+    const dataView = new DataView(arrayBuffer);
+    const magic = dataView.getUint32(0, true);
+    if (magic !== 0x46546c67) throw new Error("Not a valid GLB file.");
+
+    const jsonLen = dataView.getUint32(12, true);
+    const jsonContent = new TextDecoder().decode(new Uint8Array(arrayBuffer, 20, jsonLen));
+    const json = JSON.parse(jsonContent);
+    console.log(json);
+
+    const binChunkOffset = 20 + jsonLen + 8;
+    const binaryData = arrayBuffer.slice(binChunkOffset);
+
+    // 1. Process Materials first
+    const materials = (json.materials || []).map(m => this.createMaterial(m, json, binaryData));
+
+    // 2. Build Global World Matrices (Recursive)
+    const worldMatrices = new Array(json.nodes.length).fill(null);
+    const computeWorldMatrix = (nodeIdx, parentMatrix) => {
+      const node = json.nodes[nodeIdx];
+      let localMatrix = mat4.create();
+
+      if (node.matrix) {
+        localMatrix = mat4.clone(node.matrix);
+      } else {
+        const t = node.translation || [0, 0, 0];
+        const r = node.rotation || [0, 0, 0, 1];
+        const s = node.scale || [1, 1, 1];
+        mat4.fromRotationTranslationScale(localMatrix, r, t, s);
+      }
+
+      const worldMatrix = mat4.create();
+      if (parentMatrix) mat4.multiply(worldMatrix, parentMatrix, localMatrix);
+      else mat4.copy(worldMatrix, localMatrix);
+      
+      worldMatrices[nodeIdx] = worldMatrix;
+
+      if (node.children) {
+        for (const childIdx of node.children) computeWorldMatrix(childIdx, worldMatrix);
+      }
+    };
+
+    // Initialize matrix computation from scene roots
+    const sceneIdx = json.scene || 0;
+    for (const nodeIdx of json.scenes[sceneIdx].nodes) {
+      computeWorldMatrix(nodeIdx, null);
+    }
+
+    // 3. Instantiate Models
+    const instances = [];
+    json.nodes.forEach((node, nodeIdx) => {
+      if (node.mesh === undefined) return;
+
+      const mesh = json.meshes[node.mesh];
+      
+      // Each primitive in glTF is a separate draw call with its own material
+      mesh.primitives.forEach((primitive, primIdx) => {
+        const modelData = new ModelData(`${mesh.name || 'Model'}_${primIdx}`);
+        this.fillModelData(modelData, primitive, json, binaryData);
+        
+        // Build local BVH for the geometry
+        modelData.generateBVH();
+
+        const mat = primitive.material !== undefined ? materials[primitive.material] : new Material("Default");
+        const modelInstance = new Model(modelData.name, mat, modelData);
+
+        // Apply calculated World Matrix
+        const worldM = worldMatrices[nodeIdx];
+        mat4.invert(modelInstance.invMatrix, worldM);
+
+        instances.push(modelInstance);
+      });
+    });
+
+
+    var mats = [];
+    for (var i = 0; i < instances.length; i++) {
+      var m = instances[i].material || instances[i];
+      if (m && !mats.includes(m)) mats.push(m);
+    }
+    var texs = [];
+    for (var i = 0; i < mats.length; i++) {
+      ['emissiveTex', 'albedoTex', 'normalTex', 'heightTex', 'roughnessTex', 'metallicTex'].forEach(t => {
+        t = mats[i][t];
+        if (t && !texs.includes(t)) texs.push(t);
+      });
+    }
+    for (var i = 0; i < texs.length; i++) await texs[i].loaded;
+
+    return { models:instances, mats, texs };
+  }
+
+  fillModelData(modelData, primitive, json, bin) {
+    const getBuffer = (accessorIdx) => {
+      if (accessorIdx === undefined) return null;
+      const acc = json.accessors[accessorIdx];
+      const view = json.bufferViews[acc.bufferView];
+      const offset = (view.byteOffset || 0) + (acc.byteOffset || 0);
+      
+      // Map component types
+      if (acc.componentType === 5126) return new Float32Array(bin, offset, acc.count * (acc.type === 'VEC3' ? 3 : acc.type === 'VEC2' ? 2 : 1));
+      if (acc.componentType === 5123) return new Uint16Array(bin, offset, acc.count);
+      if (acc.componentType === 5125) return new Uint32Array(bin, offset, acc.count);
+      return null;
+    };
+
+    modelData.vertex_positions = new Float32Array(getBuffer(primitive.attributes.POSITION));
+    const normals = getBuffer(primitive.attributes.NORMAL);
+    const uvs = getBuffer(primitive.attributes.TEXCOORD_0);
+    const indices = getBuffer(primitive.indices);
+
+    if (normals) modelData.vertex_normals = new Float32Array(normals);
+    if (uvs) modelData.vertex_texcoords = new Float32Array(uvs);
+    
+    modelData.index_positions = indices instanceof Uint16Array ? new Uint32Array(indices) : indices;
+    modelData.index_normals = new Uint32Array(modelData.index_positions);
+    modelData.index_texcoords = new Uint32Array(modelData.index_positions);
+  }
+
+  createMaterial(gltfMat, json, bin) {
+    const pbr = gltfMat.pbrMetallicRoughness || {};
+    const ext = gltfMat.extensions || {};
+
+    const options = {
+      metallic: pbr.metallicFactor ?? 1.0,
+      roughness: pbr.roughnessFactor ?? 1.0,
+      ior: ext.KHR_materials_ior?.ior ?? 1.5,
+      transmission: ext.KHR_materials_transmission?.transmissionFactor ?? 0.0,
+      
+      // Clearcoat
+      clearcoat: ext.KHR_materials_clearcoat?.clearcoatFactor ?? 0.0,
+      clearcoatGloss: 1.0 - (ext.KHR_materials_clearcoat?.clearcoatRoughnessFactor ?? 0.0),
+      clearcoatIor: 1.5, // Standard fallback
+      
+      // Sheen
+      sheen: ext.KHR_materials_sheen?.sheenColorFactor ? 1.0 : 0.0,
+      sheenTint: 0.5,
+      
+      // Specular/Disney Tint
+      specularTint: ext.KHR_materials_specular?.specularColorFactor ? 1.0 : 0.0,
+      
+      // Emission
+      emittance: gltfMat.emissiveFactor || [0, 0, 0],
+      emissionIntensity: ext.KHR_materials_emissive_strength?.emissiveStrength ?? 1.0,
+    };
+
+    const baseColor = pbr.baseColorFactor ? [pbr.baseColorFactor[0], pbr.baseColorFactor[1], pbr.baseColorFactor[2]] : [1, 1, 1];
+
+    // Map Textures
+    var name = gltfMat.name || "GLB_Mat";
+    if (pbr.baseColorTexture) options.albedoTex = this.extractTexture(pbr.baseColorTexture.index, json, bin, name+"_baseColor");
+    if (gltfMat.normalTexture) options.normalTex = this.extractTexture(gltfMat.normalTexture.index, json, bin, name+"_normal");
+    if (pbr.metallicRoughnessTexture) options.roughnessTex = options.metallicTex = this.extractTexture(pbr.metallicRoughnessTexture.index, json, bin, name+"_metallicRoughness");
+    if (gltfMat.emissiveTexture) options.emissiveTex = this.extractTexture(gltfMat.emissiveTexture.index, json, bin, name+"_emissive");
+
+    return new Material(name, baseColor, options.roughness, options);
+  }
+
+  extractTexture(idx, json, bin, name) {
+    const texture = json.textures[idx];
+    const image = json.images[texture.source];
+    if (image.bufferView !== undefined) {
+      const view = json.bufferViews[image.bufferView];
+      const blob = new Blob([new Uint8Array(bin, view.byteOffset, view.byteLength)], { type: image.mimeType });
+      return new Texture(URL.createObjectURL(blob), name);
+    }
+    return new Texture(image.uri, name); // Fallback for external URI (rare in GLB)
+  }
+}
 window.handleUpload = (input) => {
   const files = Array.from(input.files);
   
@@ -1188,6 +1433,40 @@ window.handleUpload = (input) => {
     const isOBJ = name.endsWith('.obj');
     const isImage = /\.(jpe?g|png|webp)$/i.test(name);
     const isHDR = name.endsWith('.hdr');
+
+    if (name.endsWith('.glb')) {
+      const loader = new GLBLoader();
+      try {
+        // Create an object URL for the uploaded file
+        const url = URL.createObjectURL(file);
+        
+        // The loader parses the hierarchy and returns an array of Model instances
+        const {models, mats, texs} = await loader.load(url);
+        
+        models.forEach(model => {
+          // Add to your global scene or object list
+          console.log(model);
+          State.scene.objects.push(model); 
+          State.nodes.push(model);
+          State.assets.push(model.model);
+
+          // Optional: Trigger a UI update or sidebar refresh
+          console.log(`Added GLB component: ${model.name}`);
+        });
+
+        State.assets = State.assets.concat(mats);
+        State.assets = State.assets.concat(texs);
+
+        renderAssets();
+        selectNode(models[0].id);
+
+        // Cleanup the temporary URL
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        console.error("Failed to load GLB:", err);
+      }
+      return;
+    }
 
     if (isOBJ) {
       const url = URL.createObjectURL(file);

@@ -111,57 +111,93 @@ class HDRTexture {
 }
 
 class Material {
-  constructor(name, type, color, roughness, emittance, options = {}) {
-    this.id = 'material_' + Math.random().toString(36).substr(2, 9);
+  constructor(name, color = [1, 1, 1], roughness = 0.5, options = {}) {
+    this.id = 'material_' + Math.random().toString(36).substring(2, 9);
     this.name = name || "New Material";
 
-    this.type = type;
-    this.color = color;
-    this.roughness = roughness;
-    this.emittance = emittance;
-    this.emissionIntensity = 1;
+    // --- Core PBR ---
+    this.color = color;               // baseColor
+    this.roughness = roughness;       // roughness
+    this.metallic = options.metallic !== undefined ? options.metallic : 0.0;
+    this.ior = options.ior || 1.5;
     
-    // Extended Texture Support
+    // --- Emission ---
+    this.emittance = options.emittance || [1, 1, 1];
+    this.emissionIntensity = options.emissionIntensity || 0.0;
+
+    // --- Disney Layers ---
+    this.subsurface = options.subsurface || 0.0;
+    this.subsurfaceTint = options.subsurfaceTint || [...this.color];
+    this.specularTint = options.specularTint || 0.0;
+    this.anisotropic = options.anisotropic || 0.0;
+    this.anisotropicRotation = options.anisotropicRotation || 0.0;
+    this.sheen = options.sheen || 0.0;
+    this.sheenTint = options.sheenTint || 0.5;
+    this.clearcoat = options.clearcoat || 0.0;
+    this.clearcoatGloss = options.clearcoatGloss || 1.0; // Roughness of CC
+    this.clearcoatIor = options.clearcoatIor || 1.5;
+    this.transmission = options.transmission || 0.0;
+    this.concentration = options.concentration || 1.0;
+
+    // --- Texture Support ---
+    this.emissiveTex = options.emissiveTex || null;
     this.albedoTex = options.albedoTex || null;
     this.normalTex = options.normalTex || null;
     this.heightTex = options.heightTex || null;
     this.roughnessTex = options.roughnessTex || null;
-    
-    this.uvScale = options.uvScale || [1, 1];
-    this.normalMultiplier = options.normalMultiplier || 1;
-    this.heightMultiplier = options.heightMultiplier !== undefined ? options.heightMultiplier : 0.05;
-    this.heightSamp = options.heightSamp !== undefined ? options.heightSamp : 32;
-    this.heightOffset = options.heightOffset || 0.0;
-    this.ior = options.ior || 1.5;
-    this.concentration = options.concentration !== undefined ? options.concentration : 1;
+    this.metallicTex = options.metallicTex || null;
 
-    // Physics
+    // --- Texture/POM Params ---
+    this.uvScale = options.uvScale || [1, 1];
+    this.normalMultiplier = options.normalMultiplier || 1.0;
+    this.heightMultiplier = options.heightMultiplier !== undefined ? options.heightMultiplier : 0.05;
+    this.heightSamp = options.heightSamp || 32;
+    this.heightOffset = options.heightOffset || 0.0;
+
+    // --- Physics Params ---
     this.density = options.density || 5;
     this.friction = options.friction !== undefined ? options.friction : 0.5;
     this.restitution = options.restitution !== undefined ? options.restitution : 0;
   }
 }
 Material.getSchema = function(m) {
-  if (!m) m = {};
-  let aIdx = m.albedoTex ? (m.albedoTex.texIndex !== undefined ? m.albedoTex.texIndex : -1) : -1;
-  let nIdx = m.normalTex ? (m.normalTex.texIndex !== undefined ? m.normalTex.texIndex : -1) : -1;
-  let hIdx = m.heightTex ? (m.heightTex.texIndex !== undefined ? m.heightTex.texIndex : -1) : -1;
-  let rIdx = m.roughnessTex ? (m.roughnessTex.texIndex !== undefined ? m.roughnessTex.texIndex : -1) : -1;
-  var ior = m.ior;
-  if (m.type == 0) ior = ((ior-1)/(ior+1)) ** 2;
+  if (!m) m = new Material("name",[1,1,1],1.0);
+  const getIdx = (tex) => (tex && tex.texIndex !== undefined) ? tex.texIndex : -1;
   return [
-    {type: "vec3f", data: m.color.map(v=>Math.pow(v,2.2))},
-    {type: "f32", data: m.roughness},
-    {type: "vec3f", data: m.emittance?m.emittance.map(v=>v*m.emissionIntensity):[0,0,0]},
-    {type: "i32", data: m.type},
-    {type: "i32", data: aIdx},
-    {type: "i32", data: nIdx},
-    {type: "i32", data: hIdx},
-    {type: "i32", data: rIdx},
-    {type: "vec2f", data: m.uvScale},
-    {type: "f32", data: ior},
-    {type: "f32", data: m.concentration},
-    {type: "vec4f", data: [m.normalMultiplier, m.heightMultiplier, m.heightSamp, m.heightOffset]},
+    { type: "vec3f", data: m.color.map(v => Math.pow(v, 2.2)) },
+    { type: "f32", data: m.metallic },
+
+    { type: "f32", data: m.roughness },
+    { type: "f32", data: m.ior },
+    { type: "f32", data: m.specularTint },
+    { type: "f32", data: m.anisotropic },
+
+    { type: "f32", data: m.anisotropicRotation },
+    { type: "f32", data: m.sheen },
+    { type: "f32", data: m.sheenTint },
+    { type: "f32", data: m.clearcoat },
+
+    { type: "f32", data: m.clearcoatGloss },
+    { type: "f32", data: m.clearcoatIor },
+    { type: "f32", data: m.transmission },
+    { type: "f32", data: m.concentration },
+
+    { type: "vec3f", data: m.subsurfaceTint.map(v => Math.pow(v, 2.2)) },
+    { type: "f32", data: m.subsurface },
+
+    { type: "vec3f", data: m.emittance.map(v => v * m.emissionIntensity) },
+    { type: "i32", data: getIdx(m.emissiveTex) },
+
+    { type: "i32", data: getIdx(m.albedoTex) },
+    { type: "i32", data: getIdx(m.normalTex) },
+    { type: "i32", data: getIdx(m.heightTex) },
+
+    { type: "i32", data: getIdx(m.roughnessTex) },
+    { type: "i32", data: getIdx(m.metallicTex) },
+    { padding: true },
+    { type: "vec2f", data: m.uvScale },
+    
+    { type: "vec4f", data: [m.normalMultiplier, m.heightMultiplier, m.heightSamp, m.heightOffset] },
   ];
 }
 
@@ -364,9 +400,9 @@ class Cube extends Primitive {
       -1,-1,-1, -1,-1, 1, -1, 1, 1, -1, 1,-1  // Left
     ];
     const n = [
-       0,0,1, 0,0,1, 0,0,1, 0,0,1,    0,0,-1, 0,0,-1, 0,0,-1, 0,0,-1,
-       0,1,0, 0,1,0, 0,1,0, 0,1,0,    0,-1,0, 0,-1,0, 0,-1,0, 0,-1,0,
-       1,0,0, 1,0,0, 1,0,0, 1,0,0,   -1,0,0, -1,0,0, -1,0,0, -1,0,0
+      0,0,1, 0,0,1, 0,0,1, 0,0,1,  0,0,-1, 0,0,-1, 0,0,-1, 0,0,-1,
+      0,1,0, 0,1,0, 0,1,0, 0,1,0,  0,-1,0, 0,-1,0, 0,-1,0, 0,-1,0,
+      1,0,0, 1,0,0, 1,0,0, 1,0,0, -1,0,0, -1,0,0, -1,0,0, -1,0,0
     ];
     const u = [];
     for(let f=0; f<6; f++) u.push(0,0, 1,0, 1,1, 0,1);
@@ -1186,7 +1222,7 @@ class ModelData {
 }
 
 class Model extends Primitive {
-  constructor(name, material, model, inSceneBVH) {
+  constructor(name, material, model, inSceneBVH = true) {
     super(name,material,"Model");
     this.icon = "📐";
     this.model = model;
@@ -1485,7 +1521,8 @@ class Scene {
     var mats = this.getMaterials();
     var texs = [];
     for (var i = 0; i < mats.length; i++) {
-      [mats[i].albedoTex, mats[i].normalTex, mats[i].heightTex, mats[i].roughnessTex].forEach(t => {
+      ['emissiveTex', 'albedoTex', 'normalTex', 'heightTex', 'roughnessTex', 'metallicTex'].forEach(t => {
+        t = mats[i][t];
         if (t && !texs.includes(t)) texs.push(t);
       });
     }
@@ -1539,11 +1576,11 @@ class Renderer {
     // We use a prototype instance if the array is empty
     const sampleObj = objects.length > 0 ? objects[0] : false;
     const schema = getSchema(sampleObj);
-    
+
     let bytesPerObject = 0;
     const sizes = { vec2f: 8, vec3f: 12, vec4f: 16, f32: 4, i32: 4, u32: 4, mat2x2f: 16, mat3x3f: 36, mat4x4f: 64 };
     schema.forEach(item => {
-      bytesPerObject += sizes[item.type];
+      bytesPerObject += item.padding ? 4 : sizes[item.type];
     });
 
     // 2. Align to 16 bytes (WGSL Requirement)
@@ -1589,6 +1626,8 @@ class Renderer {
     let hasHeightMaps = false;
     mats.forEach((m, i) => { m._index = i; if (m.heightTex) hasHeightMaps = true; });
     const matPack = this.packDataFromSchema(mats, Material.getSchema);
+
+    console.log("Packed materials");
 
     // 2. Filter Objects
     const modelObjects = scene.objects.filter(o => o.type === "Model");
@@ -1763,7 +1802,7 @@ class Renderer {
       triangle: makeBuf(sceneData.triangle.data, 128),
       mat: makeBuf(sceneData.mat.data, sceneData.mat.size), 
       object: makeBuf(sceneData.object.data, sceneData.object.size), 
-      tlas: makeBuf(sceneData.tlas.data, 32),             
+      tlas: makeBuf(sceneData.tlas.data, 32),         
       plane: makeBuf(sceneData.plane.data, sceneData.plane.size)
     };
 
