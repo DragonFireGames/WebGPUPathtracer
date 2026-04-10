@@ -1095,7 +1095,7 @@ const renderInspector = () => {
       gui.add(a, 'centerOrigin').name('Normalize Center Origin');
       gui.add(a, 'bottomOrigin').name('Normalize Bottom Origin');
 
-      a.rotationAmount = 90;
+      a.rotationAmount = -90;
       a.rotXdeg = ()=>{a.bakeTransform(mat4.fromRotation(mat4.create(), a.rotationAmount * Math.PI / 180, [1, 0, 0]));updateModelGeometry();}
       a.rotYdeg = ()=>{a.bakeTransform(mat4.fromRotation(mat4.create(), a.rotationAmount * Math.PI / 180, [0, 1, 0]));updateModelGeometry();}
       a.rotZdeg = ()=>{a.bakeTransform(mat4.fromRotation(mat4.create(), a.rotationAmount * Math.PI / 180, [0, 0, 1]));updateModelGeometry();}
@@ -1266,12 +1266,12 @@ class GLBLoader {
     const jsonLen = dataView.getUint32(12, true);
     const jsonContent = new TextDecoder().decode(new Uint8Array(arrayBuffer, 20, jsonLen));
     const json = JSON.parse(jsonContent);
-    console.log(json);
 
     const binChunkOffset = 20 + jsonLen + 8;
     const binaryData = arrayBuffer.slice(binChunkOffset);
 
     // 1. Process Materials first
+    this.textureCache = new Map();
     const materials = (json.materials || []).map(m => this.createMaterial(m, json, binaryData));
 
     // 2. Build Global World Matrices (Recursive)
@@ -1307,22 +1307,44 @@ class GLBLoader {
     }
 
     // 3. Instantiate Models
+    // --- NEW: Mesh Data Cache ---
+    // This stores ModelData objects indexed by their glTF mesh index
+    const meshCache = new Map(); 
+
+    // 3. Instantiate Models
     const instances = [];
     json.nodes.forEach((node, nodeIdx) => {
       if (node.mesh === undefined) return;
 
-      const mesh = json.meshes[node.mesh];
+      const meshIdx = node.mesh;
+      const meshMetadata = json.meshes[meshIdx];
       
-      // Each primitive in glTF is a separate draw call with its own material
-      mesh.primitives.forEach((primitive, primIdx) => {
-        const modelData = new ModelData(`${mesh.name || 'Model'}_${primIdx}`);
-        this.fillModelData(modelData, primitive, json, binaryData);
+      // Check if we've already processed this mesh geometry
+      if (!meshCache.has(meshIdx)) {
+        const primitiveModels = [];
         
-        // Build local BVH for the geometry
-        modelData.generateBVH();
+        meshMetadata.primitives.forEach((primitive, primIdx) => {
+          const modelData = new ModelData(`${meshMetadata.name || 'Mesh'}_${meshIdx}_${primIdx}`);
+          this.fillModelData(modelData, primitive, json, binaryData);
+          
+          // Build BVH only ONCE per unique mesh primitive
+          modelData.generateBVH();
+          primitiveModels.push(modelData);
+        });
+        
+        meshCache.set(meshIdx, primitiveModels);
+      }
 
+      // Get the cached ModelData for this node
+      const cachedPrimitives = meshCache.get(meshIdx);
+
+      // Create a new Model instance for each primitive, but sharing the ModelData
+      cachedPrimitives.forEach((modelData, primIdx) => {
+        const primitive = meshMetadata.primitives[primIdx];
         const mat = primitive.material !== undefined ? materials[primitive.material] : new Material("Default");
-        const modelInstance = new Model(modelData.name, mat, modelData);
+        
+        // This is a NEW instance (new transform) but it uses OLD geometry (cached BVH)
+        const modelInstance = new Model(`${node.name || 'Node'}_${primIdx}`, mat, modelData);
 
         // Apply calculated World Matrix
         const worldM = worldMatrices[nodeIdx];
@@ -1332,10 +1354,9 @@ class GLBLoader {
       });
     });
 
-
     var mats = [];
     for (var i = 0; i < instances.length; i++) {
-      var m = instances[i].material || instances[i];
+      var m = instances[i].material;
       if (m && !mats.includes(m)) mats.push(m);
     }
     var texs = [];
@@ -1346,8 +1367,13 @@ class GLBLoader {
       });
     }
     for (var i = 0; i < texs.length; i++) await texs[i].loaded;
+    var models = [];
+    for (var i = 0; i < instances.length; i++) {
+      var m = instances[i].model;
+      if (m && !models.includes(m)) models.push(m);
+    }
 
-    return { models:instances, mats, texs };
+    return { nodes: instances, models, mats, texs };
   }
 
   fillModelData(modelData, primitive, json, bin) {
@@ -1417,14 +1443,20 @@ class GLBLoader {
   }
 
   extractTexture(idx, json, bin, name) {
+    if (this.textureCache.has(idx)) return textureCache.get(idx);
     const texture = json.textures[idx];
     const image = json.images[texture.source];
+    var url;
     if (image.bufferView !== undefined) {
       const view = json.bufferViews[image.bufferView];
       const blob = new Blob([new Uint8Array(bin, view.byteOffset, view.byteLength)], { type: image.mimeType });
-      return new Texture(URL.createObjectURL(blob), name);
+      url = URL.createObjectURL(blob);
+    } else {
+      url = image.uri;
     }
-    return new Texture(image.uri, name); // Fallback for external URI (rare in GLB)
+    const tex = new Texture(url, name);
+    this.textureCache.set(idx, tex);
+    return tex;
   }
 }
 window.handleUpload = (input) => {
@@ -1443,19 +1475,18 @@ window.handleUpload = (input) => {
         const url = URL.createObjectURL(file);
         
         // The loader parses the hierarchy and returns an array of Model instances
-        const {models, mats, texs} = await loader.load(url);
+        const {nodes, models, mats, texs} = await loader.load(url);
         
-        models.forEach(model => {
+        nodes.forEach(n => {
           // Add to your global scene or object list
-          console.log(model);
-          State.scene.objects.push(model); 
-          State.nodes.push(model);
-          State.assets.push(model.model);
+          State.scene.objects.push(n); 
+          State.nodes.push(n);
 
           // Optional: Trigger a UI update or sidebar refresh
-          console.log(`Added GLB component: ${model.name}`);
+          console.log(`Added GLB component: ${n.name}`);
         });
 
+        State.assets = State.assets.concat(models);
         State.assets = State.assets.concat(mats);
         State.assets = State.assets.concat(texs);
 
