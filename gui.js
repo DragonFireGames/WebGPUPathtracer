@@ -1443,7 +1443,7 @@ class GLBLoader {
   }
 
   extractTexture(idx, json, bin, name) {
-    if (this.textureCache.has(idx)) return textureCache.get(idx);
+    if (this.textureCache.has(idx)) return this.textureCache.get(idx);
     const texture = json.textures[idx];
     const image = json.images[texture.source];
     var url;
