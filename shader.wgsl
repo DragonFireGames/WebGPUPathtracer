@@ -128,19 +128,12 @@ struct SurfaceHit {
 @group(0) @binding(9) var<storage, read> planes: array<Plane>;
 
 // 8 Texture Bindings for rich materials
-@group(0) @binding(10) var t0: texture_2d<f32>;
-@group(0) @binding(11) var t1: texture_2d<f32>;
-@group(0) @binding(12) var t2: texture_2d<f32>;
-@group(0) @binding(13) var t3: texture_2d<f32>;
-@group(0) @binding(14) var t4: texture_2d<f32>;
-@group(0) @binding(15) var t5: texture_2d<f32>;
-@group(0) @binding(16) var t6: texture_2d<f32>;
-@group(0) @binding(17) var t7: texture_2d<f32>;
-@group(0) @binding(18) var texture_sampler: sampler;
+@group(0) @binding(10) var texture_list: texture_2d_array<f32>;
+@group(0) @binding(11) var texture_sampler: sampler;
 
 // skybox
-@group(0) @binding(19) var skyTex: texture_2d<f32>;
-@group(0) @binding(20) var skySampler: sampler;
+@group(0) @binding(12) var skyTex: texture_2d<f32>;
+@group(0) @binding(13) var skySampler: sampler;
 
 var<private> rng_state: u32;
 fn rand_pcg() -> f32 {
@@ -160,16 +153,8 @@ fn random_unit_vector() -> vec3f {
 }
 
 fn sample_texture(idx: i32, uv: vec2f) -> vec4f {
-  let nuv = vec2f(uv.x,uv.y);
-  if (idx == 0) { return textureSampleLevel(t0, texture_sampler, nuv, 0.0); }
-  else if (idx == 1) { return textureSampleLevel(t1, texture_sampler, nuv, 0.0); }
-  else if (idx == 2) { return textureSampleLevel(t2, texture_sampler, nuv, 0.0); }
-  else if (idx == 3) { return textureSampleLevel(t3, texture_sampler, nuv, 0.0); }
-  else if (idx == 4) { return textureSampleLevel(t4, texture_sampler, nuv, 0.0); }
-  else if (idx == 5) { return textureSampleLevel(t5, texture_sampler, nuv, 0.0); }
-  else if (idx == 6) { return textureSampleLevel(t6, texture_sampler, nuv, 0.0); }
-  else if (idx == 7) { return textureSampleLevel(t7, texture_sampler, nuv, 0.0); }
-  return vec4f(1.0);
+  if (idx < 0) { return vec4f(1.0); }
+  return textureSampleLevel(texture_list, texture_sampler, uv, u32(idx), 0.0);
 }
 
 // WGSL function to sample the sky
@@ -862,6 +847,7 @@ struct SurfaceContext {
   roughness: f32,
   metallic: f32,
   emittance: vec3f,
+  alpha: f32,
 };
 
 fn get_surface_context(hit: SurfaceHit, mat: Material, tbn: mat3x3f, uv: vec2f) -> SurfaceContext {
@@ -879,8 +865,10 @@ fn get_surface_context(hit: SurfaceHit, mat: Material, tbn: mat3x3f, uv: vec2f) 
 
   // 2. Resolve Albedo (Base Color)
   ctx.albedo = mat.color;
+  ctx.alpha = 1.0;
   if (mat.albedo_idx >= 0) {
     let tex_color = sample_texture(mat.albedo_idx, uv);
+    ctx.alpha = tex_color.a;
     ctx.albedo *= pow(tex_color.rgb, vec3f(2.2)); 
   }
 
@@ -947,7 +935,7 @@ fn sample_bsdf(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, radian
   let p_diff = (1.0 - p_cc) * (1.0 - f_avg) * (1.0 - mat.transmission) * (1.0 - ctx.metallic);
   let total_p = p_cc + p_spec + p_trans + p_diff;
 
-  let rng = rand_pcg();
+  let rng = rand_pcg() / ctx.alpha;
 
   if (rng < p_cc) {
     (*ray).direction = normalize(mix(reflect((*ray).direction, sn_orient), sn_orient + random_unit_vector(), cc_roughness));
@@ -991,7 +979,6 @@ fn sample_bsdf(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, radian
   }
   return true; // Successfully sampled a bounce
 }
-
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3u) {
