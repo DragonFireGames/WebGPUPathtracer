@@ -1551,17 +1551,11 @@ class Renderer {
   async init() {
     const { context } = this;
     const adapter = await navigator.gpu.requestAdapter();
-    const maxBuffers = adapter.limits.maxStorageBuffersPerShaderStage;
-    const maxSize = adapter.limits.maxStorageBufferBindingSize;
-    console.log(`Your GPU supports up to ${maxBuffers} storage buffers.`);
-    console.log(`Your GPU supports up to ${maxSize} binding size.`);
+    const limits = this.limits = adapter.limits;
+    console.log(`Your GPU supports up to ${limits.maxStorageBuffersPerShaderStage} storage buffers.`);
+    console.log(`Your GPU supports up to ${limits.maxStorageBufferBindingSize} binding size.`);
     this.device = await adapter.requestDevice({
-      requiredLimits: {
-        // Request the maximum the hardware allows
-        maxStorageBuffersPerShaderStage: maxBuffers,
-        // You might also want to bump this for your accumulation buffer
-        maxStorageBufferBindingSize: maxSize,
-      }
+      requiredLimits:limits // get the best
     });
     context.configure({ 
       device: this.device, 
@@ -1710,33 +1704,48 @@ class Renderer {
     return result;
   }
 
+  async prepareTextureArray(scene) {
+    const textures = scene.getTextures();
+    const size = 2048; // Choose your highest common resolution
+
+    // 1. Create the 'Stack'
+    const texArray = this.device.createTexture({
+      size: [size, size, Math.max(1, textures.length)],
+      format: 'rgba8unorm',
+      dimension: '2d',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+    });
+
+    for (let i = 0; i < textures.length; i++) {
+      const img = textures[i].image;
+      
+      // Use createImageBitmap to resize on the fly (very efficient)
+      const bitmap = await createImageBitmap(img, {
+        resizeWidth: size,
+        resizeHeight: size,
+        resizeQuality: 'high'
+      });
+
+      // 2. Upload to specific 'Layer' (origin[2] = i)
+      this.device.queue.copyExternalImageToTexture(
+        { source: bitmap },
+        { texture: texArray, origin: [0, 0, i] }, 
+        [size, size]
+      );
+      
+      // Save the index to your Material buffer logic
+      textures[i].texIndex = i;
+    }
+    
+    return texArray.createView({ dimension: '2d-array' });
+  }
+
   async setScene(scene) {
     this.scene = scene;
     const { canvas, device } = this;
 
     // --- 0. PREPARE TEXTURES (Up to 8 Supported) ---
-    const textures = scene.getTextures();
-    const gpuTextures = [];
-    const dummyTex = device.createTexture({ size: [1, 1], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    device.queue.writeTexture({ texture: dummyTex }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, [1, 1]);
-
-    for (let i = 0; i < 8; i++) {
-      if (i < textures.length && textures[i].image.complete && textures[i].image.naturalWidth > 0) {
-        const img = textures[i].image;
-        const bitmap = await createImageBitmap(img);
-        const tex = device.createTexture({
-          size: [img.width, img.height],
-          format: 'rgba8unorm',
-          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
-        });
-        device.queue.copyExternalImageToTexture({ source: bitmap }, { texture: tex }, [img.width, img.height]);
-        gpuTextures.push(tex);
-        textures[i].texIndex = i; 
-      } else {
-        gpuTextures.push(dummyTex); 
-      }
-    }
-    
+    const gpuTextureView = await this.prepareTextureArray(scene);
     const sampler = device.createSampler({
       magFilter: 'linear', minFilter: 'linear',
       addressModeU: 'repeat', addressModeV: 'repeat' // Required for POM tiling
@@ -1852,7 +1861,7 @@ class Renderer {
 
     console.log("Pipeline Created");
     
-    this.gpuTextures = gpuTextures;
+    this.gpuTextureView = gpuTextureView;
     this.sampler = sampler;
     this.hdrTextureView = hdrTextureView;
     this.skySampler = skySampler;
@@ -1878,11 +1887,10 @@ class Renderer {
         { binding: 7, resource: { buffer: this.buffers.bvh } },
         { binding: 8, resource: { buffer: this.buffers.triangle } },
         { binding: 9, resource: { buffer: this.buffers.plane } },
-        // Map existing GPU textures (Up to 8)
-        ...this.gpuTextures.map((t, i) => ({ binding: 10 + i, resource: t.createView() })),
-        { binding: 18, resource: this.sampler },
-        { binding: 19, resource: this.hdrTextureView },
-        { binding: 20, resource: this.skySampler }
+        { binding: 10, resource: this.gpuTextureView },
+        { binding: 11, resource: this.sampler },
+        { binding: 12, resource: this.hdrTextureView },
+        { binding: 13, resource: this.skySampler }
       ]
     });
     return this.bG;
