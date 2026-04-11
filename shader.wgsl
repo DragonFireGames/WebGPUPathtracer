@@ -727,7 +727,7 @@ fn trace_tlas(ray: Ray, hit: ptr<function, SurfaceHit>) {
         let obj = objects[i];
         let otype = obj.object_type;
         if (HAS_MESHES && otype == 0) {
-          let mesh = MeshInstance(obj.inv_matrix,obj.material_idx,0,bitcast<u32>(obj.param0),bitcast<u32>(obj.pad1));
+          let mesh = MeshInstance(obj.inv_matrix,obj.material_idx,0,bitcast<u32>(obj.param0),bitcast<u32>(obj.param1));
           trace_mesh(ray, mesh, hit);
         } else if (HAS_SPHERES && otype == 1) { 
           trace_sphere(ray, obj, hit);
@@ -1213,7 +1213,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
             weight = mis_weight(last_bsdf_pdf, sky_pdf);
           }
           // cap it
-          sky_color = min(sky_color,vec3f(5.));
+          sky_color = min(sky_color,vec3f(20.0));
         }
         radiance += throughput * sky_color * weight;
       } else { 
@@ -1242,6 +1242,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     }
 
     let ctx = get_surface_context(hit, mat, tbn, final_uv);
+
+    _ = arrayLength(&lights);
 
     radiance += throughput * ctx.emittance;
     if (length(ctx.emittance) > 1.0) { break; }
