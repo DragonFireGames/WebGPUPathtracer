@@ -7,7 +7,11 @@
 @id(6) override HAS_MESHES: bool = true;
 @id(7) override HAS_LIST_MESHES: bool = true;
 @id(8) override HAS_HEIGHTMAPS: bool = true;
-@id(9) override HAS_SKYBOX: bool = true;
+@id(9) override HAS_LIGHTS: bool = true;
+@id(10) override HAS_SKYBOX: bool = true;
+
+const PI: f32 = 3.14159265359;
+const TWO_PI: f32 = 6.28318530718;
 
 struct Ray {
   origin: vec3f,
@@ -19,6 +23,10 @@ struct SceneParams {
   ray10: vec3f, height: u32, 
   ray01: vec3f, exposure: f32,
   ray11: vec3f, seed: u32,
+  sky_width: u32,
+  sky_height: u32,
+  sky_total_lum: f32,
+  total_light_power: f32,
 };
 
 struct Material {
@@ -61,8 +69,10 @@ struct Material {
 struct TransformedObject { 
   inv_matrix: mat4x4f,
   material_idx: i32,
+  light_idx: i32,
   object_type: i32,
-  pad0: f32, pad1: f32
+  param0: f32, param1: f32,
+  pad0: f32, pad1: f32, pad2: f32
 };
 
 struct Plane { 
@@ -109,6 +119,13 @@ struct BVHNode {
   next: u32, // right child or triangle start index
 };
 
+struct Light {
+  objIdx: u32,
+  area: f32,
+  power: f32,
+  radius: f32,
+};
+
 struct SurfaceHit {
   t: f32, m_idx: i32,
   hit_p: vec3f, hit_n: vec3f, hit_uv: vec2f,
@@ -126,14 +143,17 @@ struct SurfaceHit {
 @group(0) @binding(7) var<storage, read> bvh_nodes: array<BVHNode>;
 @group(0) @binding(8) var<storage, read> triangles: array<Triangle>;
 @group(0) @binding(9) var<storage, read> planes: array<Plane>;
+@group(0) @binding(10) var<storage, read> lights: array<Light>;
 
 // 8 Texture Bindings for rich materials
-@group(0) @binding(10) var texture_list: texture_2d_array<f32>;
-@group(0) @binding(11) var texture_sampler: sampler;
+@group(0) @binding(11) var texture_list: texture_2d_array<f32>;
+@group(0) @binding(12) var texture_sampler: sampler;
 
 // skybox
-@group(0) @binding(12) var skyTex: texture_2d<f32>;
-@group(0) @binding(13) var skySampler: sampler;
+@group(0) @binding(13) var skyTex: texture_2d<f32>;
+@group(0) @binding(14) var skySampler: sampler;
+@group(0) @binding(15) var<storage, read> cond_cdf: array<f32>;
+@group(0) @binding(16) var<storage, read> marg_cdf: array<f32>;
 
 var<private> rng_state: u32;
 fn rand_pcg() -> f32 {
@@ -147,7 +167,7 @@ fn rand_pcg() -> f32 {
 
 fn random_unit_vector() -> vec3f {
   let z = rand_pcg() * 2.0 - 1.0;
-  let a = rand_pcg() * 2.0 * 3.14159265358979;
+  let a = rand_pcg() * TWO_PI;
   let r = sqrt(1.0 - z * z);
   return vec3f(r * cos(a), r * sin(a), z);
 }
@@ -159,19 +179,92 @@ fn sample_texture(idx: i32, uv: vec2f) -> vec4f {
 
 // WGSL function to sample the sky
 fn sample_sky(dir: vec3f) -> vec3f {
-  let pi = 3.14159265359;
-  
   // Convert direction to spherical coordinates
   let phi = atan2(dir.z, dir.x);      // -PI to PI
   let theta = asin(clamp(dir.y, -1.0, 1.0)); // -PI/2 to PI/2
   
   // Map to 0.0 - 1.0 range
-  let u = 0.5 + phi / (2.0 * pi);
-  let v = 0.5 - theta / pi;
+  let u = 0.5 + phi / TWO_PI;
+  let v = 0.5 - theta / PI;
   
   // Sample your texture (assuming it's in a binding called 'skyTex')
   // We use a sampler with linear filtering for smooth skies
   return textureSampleLevel(skyTex, skySampler, vec2f(u, v), 0.0).rgb;
+}
+
+struct EnvSample {
+  direction: vec3f,
+  color: vec3f,
+  pdf: f32,
+};
+
+// Generic binary search for CDF arrays
+// search_in: 0 for cond_cdf, 1 for marg_cdf
+fn binary_search_cdf(search_in: u32, offset: u32, size: u32, targ: f32) -> u32 {
+  var low: u32 = 0u;
+  var high: u32 = size;
+  while (low < high) {
+    let mid = low + (high - low) / 2u;
+    var val: f32;
+    if (search_in == 0u) {
+      val = cond_cdf[offset + mid];
+    } else {
+      val = marg_cdf[offset + mid];
+    }
+    if (val < targ) {
+      low = mid + 1u;
+    } else {
+      high = mid;
+    }
+  }
+  return max(1u, low) - 1u;
+}
+
+fn get_sky_pdf(dir: vec3f) -> f32 {
+  let phi = atan2(dir.z, dir.x);
+  let theta = acos(clamp(dir.y, -1.0, 1.0));
+  
+  // Map to [0, 1] UV space
+  let u = (phi + PI) / (2.0 * PI);
+  let v = theta / PI;
+  
+  // Sample color to get luminance (MUST match JS logic exactly)
+  let sky_color = textureSampleLevel(skyTex, skySampler, vec2f(u, v), 0.0).rgb;
+  let lum = dot(sky_color, vec3f(0.2126, 0.7152, 0.0722));
+  let sin_theta = sin(theta);
+
+  if (params.sky_total_lum <= 0.0 || sin_theta <= 0.0) {
+    return 1.0 / (4.0 * PI);
+  }
+
+  // Calculate PDF
+  let pdf = (lum * f32(params.sky_width) * f32(params.sky_height)) / (params.sky_total_lum * 2 * PI * PI);
+  
+  return pdf; // / (4.0 * PI);
+}
+
+fn sample_env_cdf(u: vec2f) -> EnvSample {
+  var samp: EnvSample;
+  
+  // Binary search to find row and column (as you already have)
+  let v_idx = binary_search_cdf(1u, 0u, params.sky_height, u.y);
+  let row_offset = v_idx * (params.sky_width + 1u);
+  let u_idx = binary_search_cdf(0u, row_offset, params.sky_width, u.x);
+
+  let u_coord = (f32(u_idx) + 0.5) / f32(params.sky_width);
+  let v_coord = (f32(v_idx) + 0.5) / f32(params.sky_height);
+  
+  let theta = PI * v_coord;
+  let phi = 2.0 * PI * u_coord - PI;
+  
+  let sin_theta = sin(theta);
+  samp.direction = vec3f(sin_theta * cos(phi), cos(theta), sin_theta * sin(phi));
+  samp.color = textureSampleLevel(skyTex, skySampler, vec2f(u_coord, v_coord), 0.0).rgb;
+  
+  // Reuse the PDF logic
+  samp.pdf = get_sky_pdf(samp.direction);
+  
+  return samp;
 }
 
 fn intersect_aabb(origin: vec3f, inv_dir: vec3f, aabb_min: vec3f, aabb_max: vec3f) -> f32 {
@@ -206,76 +299,6 @@ fn intersect_triangle(ray: Ray, tri: Triangle, hit_t: ptr<function, f32>, hit_uv
     return true;
   }
   return false;
-}
-
-fn trace_mesh(ray_world: Ray, mesh: MeshInstance, hit: ptr<function, SurfaceHit>) {
-  // Transform ray into local space. Do not normalize direction to keep t identical!
-  var ray_local: Ray;
-  ray_local.origin = (mesh.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
-  ray_local.direction = (mesh.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
-  
-  let inv_dir = 1.0 / ray_local.direction;
-  var stack: array<u32, 64>; 
-  var stack_ptr: i32 = 0;
-  
-  stack[0] = mesh.node_offset; // Start at root node for this mesh
-  stack_ptr++;
-  let base_t = intersect_aabb(ray_local.origin, inv_dir, bvh_nodes[mesh.node_offset].aabb_min, bvh_nodes[mesh.node_offset].aabb_max);
-  if (base_t < 0. || base_t >= (*hit).t) {return;}
-
-  while (stack_ptr > 0) {
-    (*hit).count++;
-    stack_ptr--;
-    let node_idx = stack[stack_ptr];
-    let node = bvh_nodes[node_idx];
-
-    //let t_aabb = intersect_aabb(ray_local.origin, inv_dir, node.aabb_min, node.aabb_max);
-    //if (t_aabb < 0. || t_aabb >= (*hit).t) { continue; }
-
-    if (node.num_triangles > 0u) {
-      // Leaf
-      let start = mesh.tri_offset + node.next;
-      let end = start + node.num_triangles;
-      for (var i = start; i < end; i++) {
-        let tri = triangles[i];
-        var t_tri = 0.0;
-        var uv_tri = vec2f(0.0);
-        var bary = vec3f(0.0);
-        
-        if (intersect_triangle(ray_local, tri, &t_tri, &uv_tri, &bary)) {
-          if (t_tri < (*hit).t) {
-            (*hit).t = t_tri;
-            (*hit).m_idx = mesh.material_idx;
-            
-            // Need local hit and normal, transform back to world space
-            let local_hit = ray_local.origin + ray_local.direction * t_tri;
-            let local_norm = normalize(tri.n0 * bary.x + tri.n1 * bary.y + tri.n2 * bary.z);
-            
-            (*hit).hit_p = ray_world.origin + ray_world.direction * t_tri;
-            
-            // Transform normal: transpose of inverse (which is just inv_matrix transposed)
-            // Inverse transpose is used for normals when non-uniform scaling occurs
-            let world_norm = transpose(mesh.inv_matrix) * vec4f(local_norm, 0.0);
-            (*hit).hit_n = normalize(world_norm.xyz);
-            (*hit).hit_uv = uv_tri;
-          }
-        }
-      }
-    } else {
-      // Inner Node
-      let left_idx = node_idx + 1u;
-      let right_idx = mesh.node_offset + node.next;
-      let left_t = intersect_aabb(ray_local.origin, inv_dir, bvh_nodes[left_idx].aabb_min, bvh_nodes[left_idx].aabb_max);
-      let right_t = intersect_aabb(ray_local.origin, inv_dir, bvh_nodes[right_idx].aabb_min, bvh_nodes[right_idx].aabb_max);
-      if (left_t < right_t) {
-        if (right_t >= 0. && right_t < (*hit).t) { stack[stack_ptr] = right_idx; stack_ptr++; }
-        if (left_t >= 0. && left_t < (*hit).t) { stack[stack_ptr] = left_idx; stack_ptr++; }
-      } else {
-        if (left_t >= 0. && left_t < (*hit).t) { stack[stack_ptr] = left_idx; stack_ptr++; }
-        if (right_t >= 0. && right_t < (*hit).t) { stack[stack_ptr] = right_idx; stack_ptr++; }
-      }
-    }
-  }
 }
 
 fn hit_unit_sphere(r: Ray) -> f32 {
@@ -342,7 +365,7 @@ fn hit_cylinder(r: Ray, r0: f32, r1: f32, t_out: ptr<function, f32>, n_out: ptr<
         // Normal is slanted based on the cone angle
         let slant = -k * (r0 + k * y);
         *n_out = normalize(vec3f(p.x, slant, p.z));
-        *uv_out = vec2f(atan2(p.z, p.x) / (2.0 * 3.14159) + 0.5, y);
+        *uv_out = vec2f(atan2(p.z, p.x) / TWO_PI + 0.5, y);
         hit = true;
       }
     }
@@ -461,6 +484,76 @@ fn hit_torus(r: Ray, Ra: f32, ra: f32) -> f32 {
   return select(result, -1.0, result > 1e10);
 }
 
+fn trace_mesh(ray_world: Ray, mesh: MeshInstance, hit: ptr<function, SurfaceHit>) {
+  // Transform ray into local space. Do not normalize direction to keep t identical!
+  var ray_local: Ray;
+  ray_local.origin = (mesh.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
+  ray_local.direction = (mesh.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
+  
+  let inv_dir = 1.0 / ray_local.direction;
+  var stack: array<u32, 64>; 
+  var stack_ptr: i32 = 0;
+  
+  stack[0] = mesh.node_offset; // Start at root node for this mesh
+  stack_ptr++;
+  let base_t = intersect_aabb(ray_local.origin, inv_dir, bvh_nodes[mesh.node_offset].aabb_min, bvh_nodes[mesh.node_offset].aabb_max);
+  if (base_t < 0. || base_t >= (*hit).t) {return;}
+
+  while (stack_ptr > 0) {
+    (*hit).count++;
+    stack_ptr--;
+    let node_idx = stack[stack_ptr];
+    let node = bvh_nodes[node_idx];
+
+    //let t_aabb = intersect_aabb(ray_local.origin, inv_dir, node.aabb_min, node.aabb_max);
+    //if (t_aabb < 0. || t_aabb >= (*hit).t) { continue; }
+
+    if (node.num_triangles > 0u) {
+      // Leaf
+      let start = mesh.tri_offset + node.next;
+      let end = start + node.num_triangles;
+      for (var i = start; i < end; i++) {
+        let tri = triangles[i];
+        var t_tri = 0.0;
+        var uv_tri = vec2f(0.0);
+        var bary = vec3f(0.0);
+        
+        if (intersect_triangle(ray_local, tri, &t_tri, &uv_tri, &bary)) {
+          if (t_tri < (*hit).t) {
+            (*hit).t = t_tri;
+            (*hit).m_idx = mesh.material_idx;
+            
+            // Need local hit and normal, transform back to world space
+            let local_hit = ray_local.origin + ray_local.direction * t_tri;
+            let local_norm = normalize(tri.n0 * bary.x + tri.n1 * bary.y + tri.n2 * bary.z);
+            
+            (*hit).hit_p = ray_world.origin + ray_world.direction * t_tri;
+            
+            // Transform normal: transpose of inverse (which is just inv_matrix transposed)
+            // Inverse transpose is used for normals when non-uniform scaling occurs
+            let world_norm = transpose(mesh.inv_matrix) * vec4f(local_norm, 0.0);
+            (*hit).hit_n = normalize(world_norm.xyz);
+            (*hit).hit_uv = uv_tri;
+          }
+        }
+      }
+    } else {
+      // Inner Node
+      let left_idx = node_idx + 1u;
+      let right_idx = mesh.node_offset + node.next;
+      let left_t = intersect_aabb(ray_local.origin, inv_dir, bvh_nodes[left_idx].aabb_min, bvh_nodes[left_idx].aabb_max);
+      let right_t = intersect_aabb(ray_local.origin, inv_dir, bvh_nodes[right_idx].aabb_min, bvh_nodes[right_idx].aabb_max);
+      if (left_t < right_t) {
+        if (right_t >= 0. && right_t < (*hit).t) { stack[stack_ptr] = right_idx; stack_ptr++; }
+        if (left_t >= 0. && left_t < (*hit).t) { stack[stack_ptr] = left_idx; stack_ptr++; }
+      } else {
+        if (left_t >= 0. && left_t < (*hit).t) { stack[stack_ptr] = left_idx; stack_ptr++; }
+        if (right_t >= 0. && right_t < (*hit).t) { stack[stack_ptr] = right_idx; stack_ptr++; }
+      }
+    }
+  }
+}
+
 fn trace_sphere(ray_world: Ray, s: TransformedObject, hit: ptr<function, SurfaceHit>) {
   var local_ray: Ray;
   local_ray.origin = (s.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
@@ -476,11 +569,11 @@ fn trace_sphere(ray_world: Ray, s: TransformedObject, hit: ptr<function, Surface
     // UV Mapping
     let phi = atan2(local_normal.z, local_normal.x);
     let theta = asin(clamp(local_normal.y, -1.0, 1.0));
-    (*hit).hit_uv = vec2f(0.5 + phi / (2.0 * 3.14159265), 0.5 + theta / 3.14159265);
+    (*hit).hit_uv = vec2f(0.5 + phi / TWO_PI, 0.5 + theta / PI);
     
     // Tangent Basis
     var local_t = vec3f(-local_normal.z, 0.0, local_normal.x);
-    if (abs(local_normal.y) > 0.999) { local_t = vec3f(1.0, 0.0, 0.0); }
+    if (abs(local_normal.y) > 0.9999) { local_t = vec3f(1.0, 0.0, 0.0); }
     local_t = normalize(local_t);
     let local_b = cross(local_normal, local_t);
     
@@ -599,8 +692,8 @@ fn trace_torus(ray: Ray, tor: Torus, hit: ptr<function, SurfaceHit>) {
       (*hit).hit_n = normalize(n_mat * local_n);
 
       // 4. UVs
-      let u = (atan2(p.z, p.x) / 6.283185) + 0.5;
-      let v = (atan2(p.y, length(p.xz) - 1.0) / 6.283185) + 0.5;
+      let u = (atan2(p.z, p.x) / TWO_PI) + 0.5;
+      let v = (atan2(p.y, length(p.xz) - 1.0) / TWO_PI) + 0.5;
       (*hit).hit_uv = vec2f(u, v);
     }
   }
@@ -634,17 +727,17 @@ fn trace_tlas(ray: Ray, hit: ptr<function, SurfaceHit>) {
         let obj = objects[i];
         let otype = obj.object_type;
         if (HAS_MESHES && otype == 0) {
-          let mesh = MeshInstance(obj.inv_matrix,obj.material_idx,0,bitcast<u32>(obj.pad0),bitcast<u32>(obj.pad1));
+          let mesh = MeshInstance(obj.inv_matrix,obj.material_idx,0,bitcast<u32>(obj.param0),bitcast<u32>(obj.pad1));
           trace_mesh(ray, mesh, hit);
         } else if (HAS_SPHERES && otype == 1) { 
           trace_sphere(ray, obj, hit);
         } else if (HAS_CUBES && otype == 2) { 
           trace_cube(ray, obj, hit);
         } else if (HAS_CYLINDERS && otype == 3) { 
-          let cylinder = Cylinder(obj.inv_matrix,obj.material_idx,obj.pad0);
+          let cylinder = Cylinder(obj.inv_matrix,obj.material_idx,obj.param0);
           trace_cylinder(ray, cylinder, hit);
         } else if (HAS_TORI && otype == 4) {
-          let torus = Torus(obj.inv_matrix,obj.material_idx,obj.pad0);
+          let torus = Torus(obj.inv_matrix,obj.material_idx,obj.param0);
           trace_torus(ray, torus, hit);
         }
       }
@@ -894,7 +987,14 @@ fn get_surface_context(hit: SurfaceHit, mat: Material, tbn: mat3x3f, uv: vec2f) 
   return ctx;
 }
 
-fn sample_bsdf(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, radiance: ptr<function, vec3f>, hit: SurfaceHit, mat: Material, ctx: SurfaceContext, hit_pos: vec3f, beers_dist: ptr<function, f32>) -> bool {
+fn mis_weight(pdf_a: f32, pdf_b: f32) -> f32 {
+  let a2 = pdf_a;
+  let b2 = pdf_b;
+  if (a2 + b2 <= 0.0) { return 0.0; }
+  return a2 / (a2 + b2);
+}
+
+fn sample_bsdf(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, radiance: ptr<function, vec3f>, hit: SurfaceHit, mat: Material, ctx: SurfaceContext, hit_pos: vec3f, beers_dist: ptr<function, f32>, is_specular: ptr<function, bool>) -> bool {
   let V = -(*ray).direction;
   let dotNV = dot(ctx.normal, V);
   let entering = dotNV > 0.0;
@@ -935,18 +1035,28 @@ fn sample_bsdf(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, radian
   let p_diff = (1.0 - p_cc) * (1.0 - f_avg) * (1.0 - mat.transmission) * (1.0 - ctx.metallic);
   let total_p = p_cc + p_spec + p_trans + p_diff;
 
-  let rng = rand_pcg() / ctx.alpha;
+  // 1. Alpha Cutout Test
+  if (rand_pcg() > ctx.alpha) {
+    (*is_specular) = true; 
+    (*ray).origin = hit_pos - n_orient * 0.005;
+    return true; 
+  }
+
+  // 2. BSDF Lobe Selection
+  let rng = rand_pcg();
 
   if (rng < p_cc) {
+    (*is_specular) = true;
     (*ray).direction = normalize(mix(reflect((*ray).direction, sn_orient), sn_orient + random_unit_vector(), cc_roughness));
     (*ray).origin = hit_pos + sn_orient * 0.001;
   } else if (rng < p_cc + p_spec) {
+    (*is_specular) = true;
     var anim_n = n_orient;
     if (mat.anisotropic > 0.0) {
       let up = select(vec3f(0,1,0), vec3f(0,0,1), abs(n_orient.y) > 0.99999);
       var T = normalize(cross(up, n_orient));
       var B = cross(n_orient, T);
-      let angle = mat.aniso_rotation * 6.28318;
+      let angle = mat.aniso_rotation * TWO_PI;
       T = T * cos(angle) + B * sin(angle);
       anim_n = normalize(mix(n_orient, cross(cross(V, T), T), mat.anisotropic));
     }
@@ -954,6 +1064,7 @@ fn sample_bsdf(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, radian
     (*ray).origin = hit_pos + n_orient * 0.001;
     (*throughput) *= F_actual / max(f_avg, 0.0001);
   } else if (rng < p_cc + p_spec + p_trans) {
+    (*is_specular) = true;
     if (!entering) { 
       let sigma = -log(max(mat.color, vec3f(0.0001))) * mat.concentration;
       let attenuation = exp(-sigma * (*beers_dist));
@@ -966,6 +1077,7 @@ fn sample_bsdf(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, radian
     (*ray).direction = normalize(mix(refr_dir, -n_orient + random_unit_vector(), base_roughness));
     (*ray).origin = hit_pos - n_orient * 0.005;
   } else if (rng < total_p) {
+    (*is_specular) = false;
     (*ray).direction = normalize(ctx.normal + random_unit_vector());
     (*ray).origin = hit_pos + ctx.normal * 0.001;
     var diff_col = ctx.albedo;
@@ -973,11 +1085,76 @@ fn sample_bsdf(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, radian
     if (mat.subsurface > 0.0) { diff_col = mix(diff_col, mat.subsurface_tint, mat.subsurface); }
     (*throughput) *= diff_col;
   } else {
-    // Pass-through (Return false to indicate a 'continue' in the main loop)
-    (*ray).origin = hit_pos - n_orient * 0.005;
+    // Absorbed by the material! (e.g. rough metals)
     return false;
   }
-  return true; // Successfully sampled a bounce
+  return true; 
+}
+
+fn pdf_bsdf(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext) -> f32 {
+  let dotNL = dot(ctx.normal, L);
+  let dotNV = dot(ctx.normal, V);
+  let same_side = (dotNL * dotNV) > 0.0;
+
+  let roughness_val = ctx.roughness;
+  let base_roughness = roughness_val * roughness_val;
+  let cc_roughness = (1.0 - mat.clearcoat_gloss) * (1.0 - mat.clearcoat_gloss);
+
+  let cc_f0 = pow((1.0 - mat.clearcoat_ior) / (1.0 + mat.clearcoat_ior), 2.0);
+  let dotSNV = max(dot(ctx.surface_normal, V), 1e-6);
+  let Fcc_base = cc_f0 + (1.0 - cc_f0) * pow(1.0 - max(dotSNV, 0.0), 5.0);
+  let w_cc = mat.clearcoat * Fcc_base;
+  
+  let f0_dielectric = pow((1.0 - mat.ior) / (1.0 + mat.ior), 2.0);
+  let f90_rough = saturate(1.0 - roughness_val);
+  let F0 = mix(vec3f(f0_dielectric), ctx.albedo, ctx.metallic);
+  let F_schlick = F0 + (vec3f(f90_rough) - F0) * pow(1.0 - max(abs(dotNV), 0.0), 5.0);
+  
+  let f_avg = clamp((F_schlick.r + F_schlick.g + F_schlick.b) / 3.0, 0.0, 1.0);
+
+  let p_cc = w_cc;
+  let p_spec = (1.0 - p_cc) * f_avg;
+  let p_trans = (1.0 - p_cc) * (1.0 - f_avg) * mat.transmission * (1.0 - ctx.metallic);
+  let p_diff = (1.0 - p_cc) * (1.0 - f_avg) * (1.0 - mat.transmission) * (1.0 - ctx.metallic);
+
+  var pdf: f32 = 0.0;
+
+  if (p_diff > 0.0 && same_side) {
+    pdf += p_diff * (max(dotNL, 0.0) / PI);
+  }
+  if (p_spec > 0.0 && same_side) {
+    pdf += p_spec * (1.0 / (2.0 * PI * (base_roughness + 0.001))); 
+  }
+  if (p_trans > 0.0 && !same_side) {
+    pdf += p_trans * (1.0 / (2.0 * PI * (base_roughness + 0.001)));
+  }
+  if (p_cc > 0.0 && same_side) {
+    pdf += p_cc * (1.0 / (2.0 * PI * (cc_roughness + 0.001)));
+  }
+
+  return max(pdf, 1e-6);
+}
+
+fn eval_bsdf(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext) -> vec3f {
+  let dotNL = max(dot(ctx.normal, L), 0.0);
+  
+  // FIX: We ONLY evaluate the diffuse lobe for Next Event Estimation (NEE).
+  // Specular lobes are perfectly handled by BSDF sampling natively.
+  // Including specular in NEE without a proper analytic GGX throws massive diffuse-looking Halos.
+  var diff_col = ctx.albedo;
+  if (mat.sheen > 0.0) { 
+    diff_col += mix(vec3f(1.0), ctx.albedo, mat.sheen_tint) * pow(1.0 - abs(dot(ctx.normal, V)), 5.0) * mat.sheen; 
+  }
+  if (mat.subsurface > 0.0) { 
+    diff_col = mix(diff_col, mat.subsurface_tint, mat.subsurface); 
+  }
+  
+  let diffuse = diff_col / PI;
+  
+  // Cut off diffuse entirely for Metals and Glass
+  let dielectric = diffuse * (1.0 - ctx.metallic) * (1.0 - mat.transmission);
+  
+  return dielectric * dotNL;
 }
 
 @compute @workgroup_size(16, 16)
@@ -1013,16 +1190,35 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   
   var throughput = vec3f(1.0);
   var radiance = vec3f(0.0);
-
-  var beers_dist = 0.;
+  var beers_dist = 0.0;
+  
+  var last_bsdf_pdf = 1.0; 
+  var is_specular_bounce = false; // Tracks if the previous hit was a mirror/glossy bounce
 
   for (var bounce = 0; bounce < BOUNCE_LIMIT; bounce++) {
     var hit = trace_scene(ray);
     //throughput*=pow(0.9,f32(hit.count));
     
+    // 1. Hit the Sky?
     if (hit.m_idx == -1) {
-      if (HAS_SKYBOX) { radiance += throughput * min(sample_sky(ray.direction),vec3f(2.)); }
-      else { radiance += throughput * vec3f(0.02, 0.03, 2.05); }
+      if (HAS_SKYBOX) {
+        var sky_color = sample_sky(ray.direction);
+        var weight = 1.0;
+        
+        if (bounce > 0) {
+          // FIX: If the ray bounced off a mirror/metal, it was NOT evaluated by NEE.
+          // Therefore we keep weight = 1.0 to preserve bright specular highlights!
+          if (!is_specular_bounce) {
+            let sky_pdf = get_sky_pdf(ray.direction);
+            weight = mis_weight(last_bsdf_pdf, sky_pdf);
+          }
+          // cap it
+          sky_color = min(sky_color,vec3f(5.));
+        }
+        radiance += throughput * sky_color * weight;
+      } else { 
+        radiance += throughput * vec3f(0.02, 0.03, 0.05);
+      }
       break;
     }
 
@@ -1030,14 +1226,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     var final_uv = hit.hit_uv * mat.uv_scale;
     var final_n = hit.hit_n;
     let tbn = mat3x3f(hit.tangent, hit.bitangent, hit.hit_n);
-    var currentheight = 0.;
-
+    var currentheight = 0.;  
+      
     beers_dist += hit.t;
 
     // --- PARALLAX OCCLUSION MAPPING ---
     let height_idx = mat.height_idx;
     if (HAS_HEIGHTMAPS && height_idx >= 0) {
-      let view_ts = normalize(transpose(tbn) * (-ray.direction)); // Ray towards eye in Tangent Space
+      let view_ts = normalize(transpose(tbn) * (-ray.direction)); 
       if (view_ts.z > 0.0) {
         let pom = calculate_pom(final_uv, view_ts, 0., mat, height_idx);
         final_uv = pom.uv;
@@ -1048,30 +1244,59 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let ctx = get_surface_context(hit, mat, tbn, final_uv);
 
     radiance += throughput * ctx.emittance;
-    if (length(ctx.emittance) > 1) { break; }
+    if (length(ctx.emittance) > 1.0) { break; }
 
-    // --- POSITION UPDATE ---
     let hit_pos = ray.origin + ray.direction * hit.t;
-    
-    if (!sample_bsdf(&ray, &throughput, &radiance, hit, mat, ctx, hit_pos, &beers_dist)) {
-      break;
-    }
+    let V = -ray.direction;
 
-    // --- HEIGHTMAP / POM LOGIC ---
+    // 3. NEXT EVENT ESTIMATION (Direct Sky Sampling)
+    // Only attempt direct diffuse sampling on materials that actually have a diffuse component
+    if (HAS_SKYBOX && ctx.metallic < 1.0 && mat.transmission < 0.1) {
+      let sky_sample = sample_env_cdf(vec2f(rand_pcg(), rand_pcg()));
+      
+      var shadow_ray = Ray(hit_pos + ctx.normal * 0.001, sky_sample.direction);
+      var in_shadow = false;
+      
+      if (HAS_HEIGHTMAPS && mat.height_idx >= 0) {
+        let light_ts = normalize(transpose(tbn) * (sky_sample.direction));
+        let shadow_res = calculate_shadow_pom(final_uv, currentheight, light_ts, mat, mat.height_idx);
+        if (shadow_res.hit) { in_shadow = true; }
+      }
+      
+      if (!in_shadow) {
+        let shadow_hit = trace_scene(shadow_ray);
+        if (shadow_hit.m_idx != -1) { in_shadow = true; }
+      }
+      
+      if (!in_shadow) {
+        let dotNL = max(dot(ctx.normal, sky_sample.direction), 0.0);
+        if (dotNL > 0.0 && sky_sample.pdf > 0.0) {
+          let sky_pdf = sky_sample.pdf;
+          let bsdf_pdf = pdf_bsdf(V, sky_sample.direction, mat, ctx);
+          let weight = mis_weight(sky_pdf, bsdf_pdf);
+
+          let bsdf_val = eval_bsdf(V, sky_sample.direction, mat, ctx);
+          radiance += throughput * (sky_sample.color * bsdf_val * weight) / max(sky_pdf, 1e-6);
+        }
+      }
+    }
+    
+    if (!sample_bsdf(&ray, &throughput, &radiance, hit, mat, ctx, hit_pos, &beers_dist, &is_specular_bounce)) { break; }
+    last_bsdf_pdf = pdf_bsdf(V, ray.direction, mat, ctx);
+    
+    // --- HEIGHTMAP / POM SHADOW LOGIC ---
     if (HAS_HEIGHTMAPS && mat.height_idx >= 0) {
       let light_ts = normalize(transpose(tbn) * (ray.direction));
       let shadow_res = calculate_shadow_pom(final_uv, currentheight, light_ts, mat, mat.height_idx);
       if (shadow_res.hit) {
-        // Update UV and hit context for the displaced surface
         final_uv = shadow_res.uv;
         let ctx_pom = get_surface_context(hit, mat, tbn, final_uv);
         
         radiance += throughput * ctx_pom.emittance;
-        if (length(ctx_pom.emittance) > 1) { break; }
+        if (length(ctx_pom.emittance) > 1.0) { break; }
         
-        if (!sample_bsdf(&ray, &throughput, &radiance, hit, mat, ctx_pom, hit_pos, &beers_dist)) {
-          break;
-        }
+        if (!sample_bsdf(&ray, &throughput, &radiance, hit, mat, ctx_pom, hit_pos, &beers_dist, &is_specular_bounce)) { break; }
+        last_bsdf_pdf = pdf_bsdf(V, ray.direction, mat, ctx_pom);
       }
     }
 
@@ -1079,9 +1304,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     if (bounce < 2) { continue; } 
     let p = max(throughput.r, max(throughput.g, throughput.b));
     let survival_prob = clamp(p, 0.05, 0.95);
-    if (rand_pcg() > survival_prob) {
-      break; 
-    }
+    if (rand_pcg() > survival_prob) { break; }
     throughput /= survival_prob;
   }
 

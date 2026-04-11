@@ -27,10 +27,42 @@ class HDRTexture {
     this.width = 1;
     this.height = 1;
     this.exposure = exposure;
+    this.threshold = 65536-16-1; // magic constant (i binary searched to get it)
     this.thumbnailURL = {};
-    this.data = new Float16Array([0.02,0.03,0.05,1.0]); // Float16Array
-    if (typeof url == 'string') this.loaded = this._load(url);
-    else this.data = new Float16Array(url);
+    if (!url) url = [0.02, 0.03, 0.05, 1.0]; // Float16Array
+    // Check if url is a vec3/vec4 array (solid color)
+    if (Array.isArray(url) || (url instanceof Float32Array && url.length <= 4)) {
+      this.width = 128;
+      this.height = 64;
+      this.data = this.generateSolid(url);
+      this.loaded = Promise.resolve();
+    } else if (typeof url === 'string') {
+      this.width = 1;
+      this.height = 1;
+      this.data = new Float16Array([0.02, 0.03, 0.05, 1.0]);
+      this.loaded = this._load(url);
+    } else {
+      this.data = url; // Assume pre-filled array
+      this.loaded = Promise.resolve();
+    }
+  }
+
+  generateSolid(color) {
+    const size = this.width * this.height * 4;
+    const data = new Float16Array(size);
+    const r = color[0] || 0;
+    const g = color[1] || 0;
+    const b = color[2] || 0;
+    const a = color[3] !== undefined ? color[3] : 1.0;
+
+    for (let i = 0; i < size; i += 4) {
+      data[i] = r;
+      data[i + 1] = g;
+      data[i + 2] = b;
+      data[i + 3] = a;
+    }
+    console.log(data);
+    return data;
   }
 
   async _load(url) {
@@ -48,9 +80,9 @@ class HDRTexture {
       // Convert RGB (3 floats) to RGBA (4 floats) for WebGPU compatibility
       this.data = new Float16Array(this.width * this.height * 4);
       for (let i = 0; i < this.width * this.height; i++) {
-        this.data[i * 4 + 0] = hdr.data[i * 4 + 0] * this.exposure;
-        this.data[i * 4 + 1] = hdr.data[i * 4 + 1] * this.exposure;
-        this.data[i * 4 + 2] = hdr.data[i * 4 + 2] * this.exposure;
+        this.data[i * 4 + 0] = Math.min(hdr.data[i * 4 + 0] * this.exposure, this.threshold);
+        this.data[i * 4 + 1] = Math.min(hdr.data[i * 4 + 1] * this.exposure, this.threshold);
+        this.data[i * 4 + 2] = Math.min(hdr.data[i * 4 + 2] * this.exposure, this.threshold);
         this.data[i * 4 + 3] = 1.0; // Alpha channel
       }
       return this;
@@ -107,6 +139,66 @@ class HDRTexture {
     const url = canvas.toDataURL("image/png");
     this.thumbnailURL[size] = url;
     return url;
+  }
+
+  buildHDRCDF() {
+    const { width, height, data } = this; 
+
+    // We need 2 types of CDFs:
+    // 1. Conditional: A CDF for each row (width + 1 elements per row)
+    // 2. Marginal: A single CDF for the rows (height + 1 elements)
+    const condCDF = new Float32Array(height * (width + 1));
+    const margCDF = new Float32Array(height + 1);
+
+    let totalWeight = 0;
+
+    for (let y = 0; y < height; y++) {
+      let rowWeight = 0;
+      const sinTheta = Math.sin(Math.PI * (y + 0.5) / height);
+      
+      condCDF[y * (width + 1)] = 0;
+      
+      for (let x = 0; x < width; x++) {
+        const idx = (y * width + x) * 4;
+        const r = Math.min(data[idx] * this.exposure, this.threshold);
+        const g = Math.min(data[idx + 1] * this.exposure, this.threshold);
+        const b = Math.min(data[idx + 2] * this.exposure, this.threshold);
+        
+        // Luminance * Sin(Theta) to account for polar mapping distortion
+        const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) * sinTheta;
+        
+        rowWeight += lum;
+        condCDF[y * (width + 1) + x + 1] = rowWeight;
+      }
+
+      // Normalize the row CDF
+      if (rowWeight > 0) {
+        for (let x = 1; x <= width; x++) {
+          condCDF[y * (width + 1) + x] /= rowWeight;
+        }
+      } else {
+        // Fallback for black rows
+        for (let x = 1; x <= width; x++) {
+          condCDF[y * (width + 1) + x] = x / width;
+        }
+      }
+
+      totalWeight += rowWeight;
+      margCDF[y + 1] = totalWeight;
+    }
+
+    // Normalize the marginal CDF
+    if (totalWeight > 0) {
+      for (let y = 1; y <= height; y++) {
+        margCDF[y] /= totalWeight;
+      }
+    } else {
+      for (let y = 1; y <= height; y++) {
+        margCDF[y] = y / height;
+      }
+    }
+
+    return { condCDF, margCDF, totalWeight };
   }
 }
 
@@ -238,6 +330,8 @@ class Primitive {
     this.matrix = mat4.create();
     this.invMatrix = mat4.create();
 
+    this.lightIdx = -1;
+
     this.vaoData = null; 
     this.needsMeshUpdate = true;
   }
@@ -253,6 +347,7 @@ class Primitive {
 
   // To be overridden by children
   generateMesh() { return { p:[], n:[], u:[], i:[] }; }
+  getArea() { return 0; }
 
   translate(x, y, z) {
     vec3.add(this.position, this.position, [x, y, z]);
@@ -355,6 +450,10 @@ class Sphere extends Primitive {
     }
     return { p, n, u, i };
   }
+  getArea() {
+    var radius = (this.scale[0]+this.scale[1]+this.scale[2])/3;
+    return 4 * Math.PI * radius * radius;
+  }
   getBounds() {
     const m = this.matrix;
 
@@ -377,7 +476,9 @@ Sphere.getSchema = function(sphere) {
   return [
     { type:"mat4x4f", data: sphere.invMatrix },
     { type:"i32", data: sphere.material._index },
+    { type:"i32", data: sphere.lightIdx },
     { type:"i32", data: 1 },
+    { padding: true, spots: 5 },
   ];
 }
 
@@ -416,7 +517,9 @@ Cube.getSchema = function(cube) {
   return [
     { type:"mat4x4f", data: cube.invMatrix },
     { type:"i32", data: cube.material._index },
+    { type:"i32", data: cube.lightIdx },
     { type:"i32", data: 2 },
+    { padding: true, spots: 5 },
   ];
 }
 
@@ -559,8 +662,10 @@ Cylinder.getSchema = function(cylinder) {
   return [
     { type: "mat4x4f", data: cylinder.invMatrix },
     { type: "i32", data: cylinder.material._index },
+    { type: "i32", data: cylinder.lightIdx },
     { type: "i32", data: 3 },
     { type: "f32", data: cylinder.top_radius },
+    { padding: true, spots: 4 },
   ];
 }
 
@@ -658,8 +763,10 @@ Torus.getSchema = function(torus) {
   return [
     { type: "mat4x4f", data: torus.invMatrix },
     { type: "i32", data: torus.material._index },
+    { type: "i32", data: torus.lightIdx },
     { type: "i32", data: 4 },
     { type: "f32", data: torus.inner_radius },
+    { padding: true, spots: 4 },
   ];
 }
 
@@ -1287,9 +1394,11 @@ Model.getSchema = function(mesh) {
   return [
     { type: "mat4x4f", data: mesh.invMatrix },
     { type: "i32", data: mesh.material._index },
+    { type: "i32", data: mesh.lightIdx },
     { type: "i32", data: 0 },
     { type: "u32", data: mesh.model._node_offset },
     { type: "u32", data: mesh.model._tri_offset },
+    { padding: true, spots: 3 },
   ];
 }
 
@@ -1528,7 +1637,56 @@ class Scene {
     }
     return texs;
   }
+  getLights() {
+    const MIN_LIGHT_POWER = 0.01; // Tweak this based on scene scale
+
+    let objects = this.objects;
+    let explicitLights = [];
+
+    for (let i = 0; i < objects.length; i++) {
+      const obj = objects[i];
+      const mat = obj.material;
+
+      if (obj.type != "Sphere") continue;
+      if (mat.emissiveTex) continue;
+      
+      // 1. Calculate Perceived Brightness (Luminance)
+      const luminance = 0.2126 * mat.emittance[0] + 0.7152 * mat.emittance[1] + 0.0722 * mat.emittance[2];
+
+      if (luminance > 0) {
+        const area = obj.getArea(); // You'll need to implement this for each primitive
+        const power = luminance * area;
+
+        if (power > MIN_LIGHT_POWER) {
+          obj.lightIdx = explicitLights.length;
+          explicitLights.push(new Light(obj, i, area, power));
+        }
+      }  
+    }
+    return explicitLights;
+  }
 }
+
+class Light {
+  constructor(object,index,area,power) {
+    this.obj = object;
+    this.objIdx = index;
+    this.area = area;
+    this.power = power;
+    var avgScale = object.scale.reduce((a,v)=>a+v,0)/3;
+    object.scaleSet(avgScale,avgScale,avgScale);
+    this.scale = avgScale;
+  }
+}
+Light.getSchema = function(light) {
+  if (!light) light = { objIdx: -1 };
+  return [
+    { type: "i32", data: light.objIdx },
+    { type: "f32", data: light.area },
+    { type: "f32", data: light.power },
+    { type: "f32", data: light.scale },
+  ];
+};
 
 async function loadText(url) {
   var res = await fetch(url,{});
@@ -1547,7 +1705,6 @@ class Renderer {
     this.frame = 0;
     this.currentFlags = {};
   }
-  
   
   async init() {
     const { context } = this;
@@ -1597,7 +1754,7 @@ class Renderer {
     let bytesPerObject = 0;
     const sizes = { vec2f: 8, vec3f: 12, vec4f: 16, f32: 4, i32: 4, u32: 4, mat2x2f: 16, mat3x3f: 36, mat4x4f: 64 };
     schema.forEach(item => {
-      bytesPerObject += item.padding ? 4 : sizes[item.type];
+      bytesPerObject += item.padding ? (item.spots || 1) * 4 : sizes[item.type];
     });
 
     // 2. Align to 16 bytes (WGSL Requirement)
@@ -1628,7 +1785,7 @@ class Renderer {
           }
         }
         // Increment offset based on type
-        offset += item.padding ? 4 : sizes[item.type];
+        offset += item.padding ? (item.spots || 1) * 4 : sizes[item.type];
       });
     });
 
@@ -1703,6 +1860,11 @@ class Renderer {
     const planePack = this.packDataFromSchema(planes, Plane.getSchema);
     const meshPack = this.packDataFromSchema(listModels, Model.getSchema);
 
+    const explicitLights = scene.getLights(); // This calls your new method
+    const hasLights = explicitLights.length > 0;
+    const lightPack = this.packDataFromSchema(explicitLights, Light.getSchema);
+    this.totalLightPower = explicitLights.reduce((a,v)=>a+v.power,0);
+
     const result = {
       mat: matPack,
       object: objectPack,
@@ -1711,6 +1873,7 @@ class Renderer {
       mesh: meshPack,
       bvh: { data: bvhData },
       triangle: { data: triData },
+      light: lightPack,
       flags: {
         hasSpheres: primitives.some(o => o.type === "Sphere"),
         hasCubes: primitives.some(o => o.type === "Cube"),
@@ -1720,6 +1883,7 @@ class Renderer {
         hasListMeshes: listModels.length > 0,
         hasPlanes: planes.length > 0,
         hasHeightMaps: hasHeightMaps,
+        hasLights: hasLights,
         hasSkybox: scene.background instanceof HDRTexture
       }
     };
@@ -1767,6 +1931,8 @@ class Renderer {
     this.scene = scene;
     const { canvas, device } = this;
 
+    console.log(this.device.limits.maxStorageBuffersPerShaderStage);
+
     // --- 0. PREPARE TEXTURES (Up to 8 Supported) ---
     const gpuTextureView = await this.prepareTextureArray(scene);
     const sampler = device.createSampler({
@@ -1808,6 +1974,8 @@ class Renderer {
       minFilter: 'linear',
     });
 
+    const { condCDF, margCDF, totalWeight } = skybox.buildHDRCDF();
+
     console.log("Created Textures");
 
     // Build the data packets
@@ -1835,10 +2003,13 @@ class Renderer {
       mat: makeBuf(sceneData.mat.data, sceneData.mat.size), 
       object: makeBuf(sceneData.object.data, sceneData.object.size), 
       tlas: makeBuf(sceneData.tlas.data, 32),         
-      plane: makeBuf(sceneData.plane.data, sceneData.plane.size)
+      plane: makeBuf(sceneData.plane.data, sceneData.plane.size),
+      light: makeBuf(sceneData.light.data, sceneData.light.size),
+      cond: makeBuf(condCDF,4),
+      marg: makeBuf(margCDF,4),
     };
 
-    this.uBuf = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.uBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     
     console.log("Created Buffers");
 
@@ -1868,7 +2039,7 @@ class Renderer {
         module: shaderModule, 
         entryPoint: 'main',
         constants: {
-          0: scene.bounces, 
+          0: scene.bounces,
           1: f.hasSpheres ? 1 : 0, 
           2: f.hasCubes ? 1 : 0, 
           3: f.hasPlanes ? 1 : 0, 
@@ -1877,13 +2048,19 @@ class Renderer {
           6: f.hasMeshes ? 1 : 0, 
           7: f.hasListMeshes ? 1 : 0, 
           8: f.hasHeightMaps ? 1 : 0,
-          9: f.hasSkybox ? 1 : 0,
+          9: f.hasLights ? 1 : 0,
+          10: f.hasSkybox ? 1 : 0,
         }
       }
     });
 
     console.log("Pipeline Created");
     
+    this.skyboxData = {
+      total_lum: totalWeight,
+      width: skybox.width,
+      height: skybox.height,
+    };
     this.gpuTextureView = gpuTextureView;
     this.sampler = sampler;
     this.hdrTextureView = hdrTextureView;
@@ -1910,10 +2087,13 @@ class Renderer {
         { binding: 7, resource: { buffer: this.buffers.bvh } },
         { binding: 8, resource: { buffer: this.buffers.triangle } },
         { binding: 9, resource: { buffer: this.buffers.plane } },
-        { binding: 10, resource: this.gpuTextureView },
-        { binding: 11, resource: this.sampler },
-        { binding: 12, resource: this.hdrTextureView },
-        { binding: 13, resource: this.skySampler }
+        { binding: 10, resource: { buffer: this.buffers.light } },
+        { binding: 11, resource: this.gpuTextureView },
+        { binding: 12, resource: this.sampler },
+        { binding: 13, resource: this.hdrTextureView },
+        { binding: 14, resource: this.skySampler },
+        { binding: 15, resource: { buffer: this.buffers.cond } },
+        { binding: 16, resource: { buffer: this.buffers.marg } }
       ]
     });
     return this.bG;
@@ -1992,18 +2172,28 @@ class Renderer {
     const cam = this.scene.camera;
     cam.updateRays2();
     var randomSeed = Math.floor(Math.random() * 0xFFFFFFFF);
-    const uData = new Float32Array(20);
+    const uData = new Float32Array(24);
     const uView = new DataView(uData.buffer);
+
     uData.set(cam.jitteredPosition, 0);
     uView.setUint32(3*4, this.frame, true);
+
     uData.set(cam.ray00, 4); 
     uView.setUint32(7*4, canvas.width, true);
+
     uData.set(cam.ray10, 8);
     uView.setUint32(11*4, canvas.height, true);
+
     uData.set(cam.ray01, 12); 
     uView.setFloat32(15*4, cam.exposure, true);
+
     uData.set(cam.ray11, 16);
     uView.setUint32(19*4, randomSeed, true);
+
+    uView.setUint32(20*4, this.skyboxData.width, true);
+    uView.setUint32(21*4, this.skyboxData.height, true);
+    uView.setFloat32(22*4, this.skyboxData.total_lum, true);
+    uView.setFloat32(23*4, this.totalLightPower, true);
 
     device.queue.writeBuffer(uBuf, 0, uData);
   }
