@@ -470,7 +470,7 @@ async function loadScene() {
   State.assets = [];
   if (scene.background) {
     var data = scene.background.data;
-    if (data.length == 4) {
+    if (scene.background.plainColor) {
       State.backgroundColor = [data[0],data[1],data[2]];
       State.backgroundIntensity = 1;
       State.background = null;
