@@ -29,13 +29,15 @@ class HDRTexture {
     this.exposure = exposure;
     this.threshold = 65536-16-1; // magic constant (i binary searched to get it)
     this.thumbnailURL = {};
+    this.enableNEE = true;
     if (!url) url = [0.02, 0.03, 0.05, 1.0]; // Float16Array
     // Check if url is a vec3/vec4 array (solid color)
     if (Array.isArray(url) || (url instanceof Float32Array && url.length <= 4)) {
-      this.width = 128;
-      this.height = 64;
-      this.data = this.generateSolid(url);
+      this.width = 1;
+      this.height = 1;
+      this.data = new Float16Array([url[0], url[1], url[2], 1.0]);
       this.loaded = Promise.resolve();
+      this.plainColor = true;
     } else if (typeof url === 'string') {
       this.width = 1;
       this.height = 1;
@@ -45,24 +47,6 @@ class HDRTexture {
       this.data = url; // Assume pre-filled array
       this.loaded = Promise.resolve();
     }
-  }
-
-  generateSolid(color) {
-    const size = this.width * this.height * 4;
-    const data = new Float16Array(size);
-    const r = color[0] || 0;
-    const g = color[1] || 0;
-    const b = color[2] || 0;
-    const a = color[3] !== undefined ? color[3] : 1.0;
-
-    for (let i = 0; i < size; i += 4) {
-      data[i] = r;
-      data[i + 1] = g;
-      data[i + 2] = b;
-      data[i + 3] = a;
-    }
-    console.log(data);
-    return data;
   }
 
   async _load(url) {
@@ -330,6 +314,7 @@ class Primitive {
     this.matrix = mat4.create();
     this.invMatrix = mat4.create();
 
+    this.enableNEE = false;
     this.lightIdx = -1;
 
     this.vaoData = null; 
@@ -478,7 +463,9 @@ Sphere.getSchema = function(sphere) {
     { type:"i32", data: sphere.material._index },
     { type:"i32", data: sphere.lightIdx },
     { type:"i32", data: 1 },
-    { padding: true, spots: 5 },
+    { padding: true },
+    { type:"vec3f", data: sphere.position },
+    { padding: true },
   ];
 }
 
@@ -519,7 +506,9 @@ Cube.getSchema = function(cube) {
     { type:"i32", data: cube.material._index },
     { type:"i32", data: cube.lightIdx },
     { type:"i32", data: 2 },
-    { padding: true, spots: 5 },
+    { padding: true },
+    { type:"vec3f", data: cube.position },
+    { padding: true },
   ];
 }
 
@@ -665,7 +654,8 @@ Cylinder.getSchema = function(cylinder) {
     { type: "i32", data: cylinder.lightIdx },
     { type: "i32", data: 3 },
     { type: "f32", data: cylinder.top_radius },
-    { padding: true, spots: 4 },
+    { type: "vec3f", data: cylinder.position },
+    { padding: true },
   ];
 }
 
@@ -766,7 +756,8 @@ Torus.getSchema = function(torus) {
     { type: "i32", data: torus.lightIdx },
     { type: "i32", data: 4 },
     { type: "f32", data: torus.inner_radius },
-    { padding: true, spots: 4 },
+    { type: "vec3f", data: torus.position },
+    { padding: true },
   ];
 }
 
@@ -1397,8 +1388,8 @@ Model.getSchema = function(mesh) {
     { type: "i32", data: mesh.lightIdx },
     { type: "i32", data: 0 },
     { type: "u32", data: mesh.model._node_offset },
+    { type: "vec3f", data: mesh.position },
     { type: "u32", data: mesh.model._tri_offset },
-    { padding: true, spots: 3 },
   ];
 }
 
@@ -1637,18 +1628,17 @@ class Scene {
     }
     return texs;
   }
-  getLights() {
+  getLights(objects) {
     const MIN_LIGHT_POWER = 0.01; // Tweak this based on scene scale
 
-    let objects = this.objects;
     let explicitLights = [];
-
     for (let i = 0; i < objects.length; i++) {
       const obj = objects[i];
       const mat = obj.material;
 
       if (obj.type != "Sphere") continue;
       if (mat.emissiveTex) continue;
+      if (!mat.enableNEE) continue;
       
       // 1. Calculate Perceived Brightness (Luminance)
       const luminance = 0.2126 * mat.emittance[0] + 0.7152 * mat.emittance[1] + 0.0722 * mat.emittance[2];
@@ -1860,7 +1850,7 @@ class Renderer {
     const planePack = this.packDataFromSchema(planes, Plane.getSchema);
     const meshPack = this.packDataFromSchema(listModels, Model.getSchema);
 
-    const explicitLights = scene.getLights(); // This calls your new method
+    const explicitLights = scene.getLights(sceneObjects); // This calls your new method
     const hasLights = explicitLights.length > 0;
     const lightPack = this.packDataFromSchema(explicitLights, Light.getSchema);
     this.totalLightPower = explicitLights.reduce((a,v)=>a+v.power,0);
@@ -1884,7 +1874,8 @@ class Renderer {
         hasPlanes: planes.length > 0,
         hasHeightMaps: hasHeightMaps,
         hasLights: hasLights,
-        hasSkybox: scene.background instanceof HDRTexture
+        hasSkybox: scene.background instanceof HDRTexture,
+        misSkybox: !scene.background.plainColor
       }
     };
 
@@ -2050,6 +2041,7 @@ class Renderer {
           8: f.hasHeightMaps ? 1 : 0,
           9: f.hasLights ? 1 : 0,
           10: f.hasSkybox ? 1 : 0,
+          11: f.misSkybox ? 1 : 0,
         }
       }
     });
