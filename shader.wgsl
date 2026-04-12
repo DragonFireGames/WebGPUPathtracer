@@ -9,6 +9,7 @@
 @id(8) override HAS_HEIGHTMAPS: bool = true;
 @id(9) override HAS_LIGHTS: bool = true;
 @id(10) override HAS_SKYBOX: bool = true;
+@id(11) override MIS_SKYBOX: bool = true;
 
 const PI: f32 = 3.14159265359;
 const TWO_PI: f32 = 6.28318530718;
@@ -71,8 +72,9 @@ struct TransformedObject {
   material_idx: i32,
   light_idx: i32,
   object_type: i32,
-  param0: f32, param1: f32,
-  pad0: f32, pad1: f32, pad2: f32
+  param0: f32, 
+  world_position: vec3f,
+  param1: f32,
 };
 
 struct Plane { 
@@ -120,16 +122,17 @@ struct BVHNode {
 };
 
 struct Light {
-  objIdx: u32,
+  obj_idx: i32,
   area: f32,
   power: f32,
-  radius: f32,
+  scale: f32,
 };
 
 struct SurfaceHit {
   t: f32, m_idx: i32,
   hit_p: vec3f, hit_n: vec3f, hit_uv: vec2f,
   tangent: vec3f, bitangent: vec3f,
+  o_idx: i32,
   count: i32,
 };
 
@@ -484,7 +487,7 @@ fn hit_torus(r: Ray, Ra: f32, ra: f32) -> f32 {
   return select(result, -1.0, result > 1e10);
 }
 
-fn trace_mesh(ray_world: Ray, mesh: MeshInstance, hit: ptr<function, SurfaceHit>) {
+fn trace_mesh(ray_world: Ray, mesh: MeshInstance, hit: ptr<function, SurfaceHit>, idx: i32) {
   // Transform ray into local space. Do not normalize direction to keep t identical!
   var ray_local: Ray;
   ray_local.origin = (mesh.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
@@ -534,6 +537,7 @@ fn trace_mesh(ray_world: Ray, mesh: MeshInstance, hit: ptr<function, SurfaceHit>
             let world_norm = transpose(mesh.inv_matrix) * vec4f(local_norm, 0.0);
             (*hit).hit_n = normalize(world_norm.xyz);
             (*hit).hit_uv = uv_tri;
+            (*hit).o_idx = idx;
           }
         }
       }
@@ -554,7 +558,7 @@ fn trace_mesh(ray_world: Ray, mesh: MeshInstance, hit: ptr<function, SurfaceHit>
   }
 }
 
-fn trace_sphere(ray_world: Ray, s: TransformedObject, hit: ptr<function, SurfaceHit>) {
+fn trace_sphere(ray_world: Ray, s: TransformedObject, hit: ptr<function, SurfaceHit>, idx: i32) {
   var local_ray: Ray;
   local_ray.origin = (s.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
   local_ray.direction = (s.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
@@ -583,10 +587,11 @@ fn trace_sphere(ray_world: Ray, s: TransformedObject, hit: ptr<function, Surface
     (*hit).tangent = normalize(n_mat * local_t);
     (*hit).bitangent = normalize(n_mat * local_b);
     (*hit).hit_p = ray_world.origin + ray_world.direction * t;
+    (*hit).o_idx = idx;
   }
 }
 
-fn trace_cube(ray_world: Ray, c: TransformedObject, hit: ptr<function, SurfaceHit>) {
+fn trace_cube(ray_world: Ray, c: TransformedObject, hit: ptr<function, SurfaceHit>, idx: i32) {
   var local_ray: Ray;
   local_ray.origin = (c.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
   local_ray.direction = (c.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
@@ -627,6 +632,7 @@ fn trace_cube(ray_world: Ray, c: TransformedObject, hit: ptr<function, SurfaceHi
     (*hit).tangent = normalize(n_mat * local_t);
     (*hit).bitangent = normalize(n_mat * local_b);
     (*hit).hit_p = ray_world.origin + ray_world.direction * t;
+    (*hit).o_idx = idx;
   }
 }
 
@@ -646,7 +652,7 @@ fn trace_plane(ray_world: Ray, p: Plane, hit: ptr<function, SurfaceHit>) {
   }
 }
 
-fn trace_cylinder(ray_world: Ray, f: Cylinder, hit: ptr<function, SurfaceHit>) {
+fn trace_cylinder(ray_world: Ray, f: Cylinder, hit: ptr<function, SurfaceHit>, idx: i32) {
   var local_ray: Ray;
   local_ray.origin = (f.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
   local_ray.direction = (f.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
@@ -661,11 +667,12 @@ fn trace_cylinder(ray_world: Ray, f: Cylinder, hit: ptr<function, SurfaceHit>) {
       let n_mat = transpose(mat3x3f(f.inv_matrix[0].xyz, f.inv_matrix[1].xyz, f.inv_matrix[2].xyz));
       (*hit).hit_n = normalize(n_mat * n);
       (*hit).hit_p = ray_world.origin + ray_world.direction * t;
+      (*hit).o_idx = idx;
     }
   }
 }
 
-fn trace_torus(ray: Ray, tor: Torus, hit: ptr<function, SurfaceHit>) {
+fn trace_torus(ray: Ray, tor: Torus, hit: ptr<function, SurfaceHit>, idx: i32) {
   var l_ray: Ray;
   l_ray.origin = (tor.inv_matrix * vec4f(ray.origin, 1.0)).xyz;
   l_ray.direction = (tor.inv_matrix * vec4f(ray.direction, 0.0)).xyz;
@@ -695,6 +702,8 @@ fn trace_torus(ray: Ray, tor: Torus, hit: ptr<function, SurfaceHit>) {
       let u = (atan2(p.z, p.x) / TWO_PI) + 0.5;
       let v = (atan2(p.y, length(p.xz) - 1.0) / TWO_PI) + 0.5;
       (*hit).hit_uv = vec2f(u, v);
+
+      (*hit).o_idx = idx;
     }
   }
 }
@@ -726,19 +735,20 @@ fn trace_tlas(ray: Ray, hit: ptr<function, SurfaceHit>) {
       for (var i = start; i < end; i++) {
         let obj = objects[i];
         let otype = obj.object_type;
+        let idx = i32(i);
         if (HAS_MESHES && otype == 0) {
           let mesh = MeshInstance(obj.inv_matrix,obj.material_idx,0,bitcast<u32>(obj.param0),bitcast<u32>(obj.param1));
-          trace_mesh(ray, mesh, hit);
+          trace_mesh(ray, mesh, hit, idx);
         } else if (HAS_SPHERES && otype == 1) { 
-          trace_sphere(ray, obj, hit);
+          trace_sphere(ray, obj, hit, idx);
         } else if (HAS_CUBES && otype == 2) { 
-          trace_cube(ray, obj, hit);
+          trace_cube(ray, obj, hit, idx);
         } else if (HAS_CYLINDERS && otype == 3) { 
           let cylinder = Cylinder(obj.inv_matrix,obj.material_idx,obj.param0);
-          trace_cylinder(ray, cylinder, hit);
+          trace_cylinder(ray, cylinder, hit, idx);
         } else if (HAS_TORI && otype == 4) {
           let torus = Torus(obj.inv_matrix,obj.material_idx,obj.param0);
-          trace_torus(ray, torus, hit);
+          trace_torus(ray, torus, hit, idx);
         }
       }
     } else {
@@ -759,7 +769,7 @@ fn trace_tlas(ray: Ray, hit: ptr<function, SurfaceHit>) {
 }
 
 fn trace_scene(ray: Ray) -> SurfaceHit {
-  var hit = SurfaceHit(1e10, -1, vec3f(0.0), vec3f(0.0), vec2f(0.0), vec3f(0.0), vec3f(0.0), 0);
+  var hit = SurfaceHit(1e10, -1, vec3f(0.0), vec3f(0.0), vec2f(0.0), vec3f(0.0), vec3f(0.0), -1, 0);
   
   if (HAS_PLANES) {
     for (var i = 0u; i < arrayLength(&planes); i++) {
@@ -773,7 +783,7 @@ fn trace_scene(ray: Ray) -> SurfaceHit {
 
   if (HAS_LIST_MESHES) {
     for (var i = 0u; i < arrayLength(&meshes); i++) {
-      trace_mesh(ray, meshes[i], &hit);
+      trace_mesh(ray, meshes[i], &hit, -1);
     }
   }
 
@@ -987,6 +997,133 @@ fn get_surface_context(hit: SurfaceHit, mat: Material, tbn: mat3x3f, uv: vec2f) 
   return ctx;
 }
 
+
+// ---------------------------------------------------------
+// SPHERICAL LIGHT SAMPLING (VISIBLE CONE METHOD)
+// ---------------------------------------------------------
+
+// Helper: Generates a robust Orthonormal Basis (Frisvad's method)
+// Avoids the singularity at z = -1 better than standard cross products.
+// fn build_tangent_space(n: vec3f) -> mat3x3f {
+//   let sign_z = select(-1.0, 1.0, n.z >= 0.0);
+//   let a = -1.0 / (sign_z + n.z);
+//   let b = n.x * n.y * a;
+  
+//   let b1 = vec3f(1.0 + sign_z * n.x * n.x * a, sign_z * b, -sign_z * n.x);
+//   let b2 = vec3f(b, sign_z + n.y * n.y * a, -n.y);
+  
+//   return mat3x3f(b1, b2, n);
+// }
+// Robust Tangent Space Generation (Duff et al.)
+fn build_tangent_space(N: vec3f) -> mat3x3f {
+  let a = select(vec3f(0,1,0), vec3f(0,0,1), abs(N.y) > 0.99999);
+  let T = normalize(cross(N, a));
+  let B = cross(T, N);
+  return mat3x3f(T, B, N);
+}
+
+struct LightSample {
+  dir: vec3f,     // Direction from surface to the light
+  color: vec3f,
+  dist: f32,      // Distance to the light surface (useful later for shadows)
+  pdf: f32,       // Probability Density Function (Solid Angle)
+}
+
+fn light_sphere_pdf(light: Light, sphere: TransformedObject, hit_pos: vec3f, dir: vec3f) -> f32 {
+  let light_pos = sphere.world_position;
+
+  let d = light_pos - hit_pos;
+  let d2 = dot(d, d);
+  let r2 = light.scale * light.scale;
+  
+  // If we are inside the light sphere, it surrounds us completely (4 Pi steradians)
+  if (d2 <= r2) {
+    return 1.0 / (4.0 * PI);
+  }
+  
+  // Check if the direction actually intersects the sphere
+  let tc = dot(d, dir);
+  if (tc <= 0.0) { return 0.0; } // Pointing away
+  
+  let d_perp_sq = d2 - tc * tc;
+  if (d_perp_sq > r2) { return 0.0; } // Misses the sphere
+  
+  // Calculate the subtended cone angle
+  let sin_theta_max_sq = r2 / d2;
+  let cos_theta_max = sqrt(max(0.0, 1.0 - sin_theta_max_sq));
+  
+  // Solid angle of the cone
+  let solid_angle = TWO_PI * (1.0 - cos_theta_max);
+  return 1.0 / max(solid_angle,0.0001);
+}
+
+fn sample_light_sphere(light: Light, sphere: TransformedObject, hit_pos: vec3f, xi: vec2f) -> LightSample {
+  let light_pos = sphere.world_position;
+  let mat = materials[sphere.material_idx];
+  
+  let d = light_pos - hit_pos;
+  let d2 = dot(d, d);
+  let r2 = light.scale * light.scale;
+  
+  var ls: LightSample;
+  ls.color = mat.emittance;
+  
+  if (d2 <= r2) {
+    // Inside the light, sample a uniform spherical direction
+    let z = 1.0 - 2.0 * xi.x;
+    let sin_theta = sqrt(max(0.0, 1.0 - z * z));
+    let phi = TWO_PI * xi.y;
+    
+    ls.dir = vec3f(sin_theta * cos(phi), sin_theta * sin(phi), z);
+    ls.dist = 0.0; 
+    ls.pdf = 1.0 / (4.0 * PI);
+    return ls;
+  }
+  
+  let sin_theta_max_sq = r2 / d2;
+  let cos_theta_max = sqrt(max(0.0, 1.0 - sin_theta_max_sq));
+  
+  // Sample uniformly within the cone subtended by the sphere
+  let cos_theta = 1.0 - xi.x * (1.0 - cos_theta_max);
+  let sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
+  let phi = TWO_PI * xi.y;
+  
+  let local_dir = vec3f(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
+  
+  // Transform local cone direction to world space
+  let w = normalize(d);
+  let tbn = build_tangent_space(w);
+  ls.dir = normalize(tbn * local_dir);
+  
+  // Find intersection distance to the sphere surface (for your future shadow rays)
+  let tc = dot(d, ls.dir);
+  let d_perp_sq = d2 - tc * tc;
+  let t_c = sqrt(max(0.0, r2 - d_perp_sq));
+  ls.dist = tc - t_c; 
+  
+  let solid_angle = TWO_PI * (1.0 - cos_theta_max);
+  ls.pdf = 1.0 / max(solid_angle,0.0001);
+  
+  return ls;
+}
+
+fn get_light_pdf(light: Light, obj: TransformedObject, hit_pos: vec3f, dir: vec3f) -> f32 {
+  if (HAS_SPHERES && obj.object_type == 1) {
+    return light_sphere_pdf(light, obj, hit_pos, dir);
+  }
+  return 0.0;
+}
+
+// Samples a random direction towards the spherical light
+fn sample_light(light: Light, obj: TransformedObject, hit_pos: vec3f) -> LightSample {
+  var samp: LightSample;
+  if (HAS_SPHERES && obj.object_type == 1) {
+    let xi_light = vec2f(rand_pcg(), rand_pcg());
+    samp = sample_light_sphere(light, obj, hit_pos, xi_light);
+  }
+  return samp;
+}
+
 fn mis_weight(pdf_a: f32, pdf_b: f32) -> f32 {
   let a2 = pdf_a;
   let b2 = pdf_b;
@@ -1194,9 +1331,12 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   
   var last_bsdf_pdf = 1.0; 
   var is_specular_bounce = false; // Tracks if the previous hit was a mirror/glossy bounce
+  _ = arrayLength(&lights);
 
   for (var bounce = 0; bounce < BOUNCE_LIMIT; bounce++) {
     var hit = trace_scene(ray);
+    var obj: TransformedObject;
+    if (hit.o_idx >= 0) { obj = objects[hit.o_idx]; }
     //throughput*=pow(0.9,f32(hit.count));
     
     // 1. Hit the Sky?
@@ -1208,7 +1348,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         if (bounce > 0) {
           // FIX: If the ray bounced off a mirror/metal, it was NOT evaluated by NEE.
           // Therefore we keep weight = 1.0 to preserve bright specular highlights!
-          if (!is_specular_bounce) {
+          if (!is_specular_bounce && MIS_SKYBOX) {
             let sky_pdf = get_sky_pdf(ray.direction);
             weight = mis_weight(last_bsdf_pdf, sky_pdf);
           }
@@ -1226,7 +1366,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     var final_uv = hit.hit_uv * mat.uv_scale;
     var final_n = hit.hit_n;
     let tbn = mat3x3f(hit.tangent, hit.bitangent, hit.hit_n);
-    var currentheight = 0.;  
+    var currentheight = 0.;
       
     beers_dist += hit.t;
 
@@ -1243,36 +1383,83 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
     let ctx = get_surface_context(hit, mat, tbn, final_uv);
 
-    _ = arrayLength(&lights);
-
-    radiance += throughput * ctx.emittance;
-    if (length(ctx.emittance) > 1.0) { break; }
+    if (length(ctx.emittance) > 0.0) { // Or however you check if it's a light
+      var weight = 1.0;
+      if (HAS_LIGHTS && !is_specular_bounce && bounce > 0 && hit.o_idx > 0 && obj.light_idx > 0) {
+        // Calculate the probability that we WOULD have explicitly sampled this direction
+        // (Assuming you have 1 light. If you have N lights, multiply light_pdf by 1.0/N)
+        let light = lights[obj.light_idx];
+        let light_pdf = get_light_pdf(light, obj, ray.origin, ray.direction) / f32(arrayLength(&lights));
+        weight = mis_weight(last_bsdf_pdf, light_pdf);
+      }
+      radiance += throughput * ctx.emittance * weight;
+      if (HAS_LIGHTS && hit.o_idx > 0 && obj.light_idx > 0) { break; }
+      else if (length(ctx.emittance) > 1.0) { break; }
+    }
 
     let hit_pos = ray.origin + ray.direction * hit.t;
     let V = -ray.direction;
 
+    if (HAS_LIGHTS && ctx.metallic < 1.0 && mat.transmission < 0.1) {
+      for (var i = 0u; i < arrayLength(&lights); i++) {
+        let light = lights[i];
+        if (light.obj_idx < 0) { continue; }
+        let obj = objects[light.obj_idx];
+        if (obj.material_idx < 0) { continue; }
+        let mat = materials[obj.material_idx];
+
+        let light_sample = sample_light(light, obj, hit_pos);
+        if (light_sample.pdf <= 0.0) { continue; }
+        let dotNL = dot(ctx.normal, light_sample.dir);
+        if (dotNL <= 0.0) { continue; }
+        let shadow_ray = Ray(hit_pos + ctx.surface_normal * 0.001, light_sample.dir);
+        var in_shadow = false;
+
+        if (HAS_HEIGHTMAPS && mat.height_idx >= 0) {
+          let light_ts = normalize(transpose(tbn) * (light_sample.dir));
+          let shadow_res = calculate_shadow_pom(final_uv, currentheight, light_ts, mat, mat.height_idx);
+          if (shadow_res.hit) { in_shadow = true; }
+        }
+        
+        if (!in_shadow) {
+          let shadow_hit = trace_scene(shadow_ray);
+          if (shadow_hit.o_idx != light.obj_idx) { in_shadow = true; }
+        }
+
+        if (!in_shadow) {
+          let light_pdf = light_sample.pdf;
+          let bsdf_pdf = pdf_bsdf(V, light_sample.dir, mat, ctx);  
+          let weight = mis_weight(light_pdf, bsdf_pdf);
+          
+          let bsdf_val = eval_bsdf(V, light_sample.dir, mat, ctx); 
+          // does this have dotNL in it?
+          radiance += throughput * (light_sample.color * bsdf_val * weight) / max(light_pdf, 1e-6);
+        }
+      }
+    }
+
     // 3. NEXT EVENT ESTIMATION (Direct Sky Sampling)
     // Only attempt direct diffuse sampling on materials that actually have a diffuse component
-    if (HAS_SKYBOX && ctx.metallic < 1.0 && mat.transmission < 0.1) {
+    if (HAS_SKYBOX && MIS_SKYBOX && ctx.metallic < 1.0 && mat.transmission < 0.1) {
       let sky_sample = sample_env_cdf(vec2f(rand_pcg(), rand_pcg()));
       
-      var shadow_ray = Ray(hit_pos + ctx.normal * 0.001, sky_sample.direction);
-      var in_shadow = false;
-      
-      if (HAS_HEIGHTMAPS && mat.height_idx >= 0) {
-        let light_ts = normalize(transpose(tbn) * (sky_sample.direction));
-        let shadow_res = calculate_shadow_pom(final_uv, currentheight, light_ts, mat, mat.height_idx);
-        if (shadow_res.hit) { in_shadow = true; }
-      }
-      
-      if (!in_shadow) {
-        let shadow_hit = trace_scene(shadow_ray);
-        if (shadow_hit.m_idx != -1) { in_shadow = true; }
-      }
-      
-      if (!in_shadow) {
-        let dotNL = max(dot(ctx.normal, sky_sample.direction), 0.0);
-        if (dotNL > 0.0 && sky_sample.pdf > 0.0) {
+      let dotNL = max(dot(ctx.normal, sky_sample.direction), 0.0);
+      if (dotNL > 0.0 && sky_sample.pdf > 0.0) {
+        var shadow_ray = Ray(hit_pos + ctx.surface_normal * 0.001, sky_sample.direction);
+        var in_shadow = false;
+        
+        if (HAS_HEIGHTMAPS && mat.height_idx >= 0) {
+          let light_ts = normalize(transpose(tbn) * (sky_sample.direction));
+          let shadow_res = calculate_shadow_pom(final_uv, currentheight, light_ts, mat, mat.height_idx);
+          if (shadow_res.hit) { in_shadow = true; }
+        }
+        
+        if (!in_shadow) {
+          let shadow_hit = trace_scene(shadow_ray);
+          if (shadow_hit.m_idx != -1) { in_shadow = true; }
+        }
+        
+        if (!in_shadow) {
           let sky_pdf = sky_sample.pdf;
           let bsdf_pdf = pdf_bsdf(V, sky_sample.direction, mat, ctx);
           let weight = mis_weight(sky_pdf, bsdf_pdf);
@@ -1309,12 +1496,12 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     if (rand_pcg() > survival_prob) { break; }
     throughput /= survival_prob;
   }
-
+  
   let weight = 1.0 / f32(params.sample_number + 1u);
   let old_c = accum_buffer[idx].rgb;
   var final_c = mix(old_c, radiance, weight);
   accum_buffer[idx] = vec4f(final_c, 1.0);
-
+  
   final_c *= vec3f(params.exposure);
   //final_c = final_c / (final_c + vec3(1.0));
   final_c = pow(final_c, vec3f(0.4545));
