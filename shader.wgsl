@@ -13,16 +13,14 @@
 
 const PI: f32 = 3.14159265359;
 const TWO_PI: f32 = 6.28318530718;
+const INFINITY: f32 = 65504.0;
 
 struct Ray {
   origin: vec3f,
   direction: vec3f
 };
 struct SceneParams {
-  eye: vec3f, sample_number: u32, 
-  ray00: vec3f, width: u32, 
-  ray10: vec3f, height: u32, 
-  ray01: vec3f, exposure: f32,
+  eye: vec3f, sample_number: u32, ray00: vec3f, width: u32, ray10: vec3f, height: u32, ray01: vec3f, exposure: f32,
   ray11: vec3f, seed: u32,
   sky_width: u32,
   sky_height: u32,
@@ -32,39 +30,23 @@ struct SceneParams {
 
 struct Material {
   color: vec3f,
-  metallic: f32,
-
-  roughness: f32,
+  metallic: f32, roughness: f32,
   ior: f32,
   specular_tint: f32,
-  anisotropic: f32,
-
-  aniso_rotation: f32,
+  anisotropic: f32, aniso_rotation: f32,
   sheen: f32,
   sheen_tint: f32,
-  clearcoat: f32,
-
-  clearcoat_gloss: f32,
+  clearcoat: f32, clearcoat_gloss: f32,
   clearcoat_ior: f32,
   transmission: f32,
-  concentration: f32,
-
-  subsurface_tint: vec3f,
-  subsurface: f32,
-
-  emittance: vec3f,
-  emissive_idx: i32,
-
-  albedo_idx: i32,
+  concentration: f32, subsurface_tint: vec3f,
+  subsurface: f32, emittance: vec3f,
+  emissive_idx: i32, albedo_idx: i32,
   normal_idx: i32,
   height_idx: i32,
-  roughness_idx: i32,
-
-  metallic_idx: i32,
+  roughness_idx: i32, metallic_idx: i32,
   _pad1: f32,
-  uv_scale: vec2f,
-
-  height_params: vec4f, // x: norm_mult, y: multiplier, z: samples, w: offset
+  uv_scale: vec2f, height_params: vec4f, // x: norm_mult, y: multiplier, z: samples, w: offset
 };
 
 struct TransformedObject { 
@@ -72,8 +54,7 @@ struct TransformedObject {
   material_idx: i32,
   light_idx: i32,
   object_type: i32,
-  param0: f32, 
-  world_position: vec3f,
+  param0: f32, world_position: vec3f,
   param1: f32,
 };
 
@@ -168,6 +149,13 @@ fn rand_pcg() -> f32 {
   return f32(word) * 2.3283064365386963e-10;
 }
 
+fn max_component(v: vec3f) -> f32 {
+  return max(max(v.x,v.y),v.z);
+}
+fn min_component(v: vec3f) -> f32 {
+  return min(min(v.x,v.y),v.z);
+}
+
 fn random_unit_vector() -> vec3f {
   let z = rand_pcg() * 2.0 - 1.0;
   let a = rand_pcg() * TWO_PI;
@@ -194,12 +182,6 @@ fn sample_sky(dir: vec3f) -> vec3f {
   // We use a sampler with linear filtering for smooth skies
   return textureSampleLevel(skyTex, skySampler, vec2f(u, v), 0.0).rgb;
 }
-
-struct EnvSample {
-  direction: vec3f,
-  color: vec3f,
-  pdf: f32,
-};
 
 // Generic binary search for CDF arrays
 // search_in: 0 for cond_cdf, 1 for marg_cdf
@@ -246,8 +228,8 @@ fn get_sky_pdf(dir: vec3f) -> f32 {
   return pdf; // / (4.0 * PI);
 }
 
-fn sample_env_cdf(u: vec2f) -> EnvSample {
-  var samp: EnvSample;
+fn sample_env_cdf(u: vec2f) -> LightSample {
+  var samp: LightSample;
   
   // Binary search to find row and column (as you already have)
   let v_idx = binary_search_cdf(1u, 0u, params.sky_height, u.y);
@@ -261,11 +243,12 @@ fn sample_env_cdf(u: vec2f) -> EnvSample {
   let phi = 2.0 * PI * u_coord - PI;
   
   let sin_theta = sin(theta);
-  samp.direction = vec3f(sin_theta * cos(phi), cos(theta), sin_theta * sin(phi));
+  samp.dir = vec3f(sin_theta * cos(phi), cos(theta), sin_theta * sin(phi));
   samp.color = textureSampleLevel(skyTex, skySampler, vec2f(u_coord, v_coord), 0.0).rgb;
   
   // Reuse the PDF logic
-  samp.pdf = get_sky_pdf(samp.direction);
+  samp.pdf = get_sky_pdf(samp.dir);
+  samp.dist = INFINITY;
   
   return samp;
 }
@@ -275,8 +258,8 @@ fn intersect_aabb(origin: vec3f, inv_dir: vec3f, aabb_min: vec3f, aabb_max: vec3
   let t1 = (aabb_max - origin) * inv_dir;
   let tmin = min(t0, t1);
   let tmax = max(t0, t1);
-  let t_near = max(max(tmin.x, tmin.y), tmin.z);
-  let t_far = min(min(tmax.x, tmax.y), tmax.z);
+  let t_near = max_component(tmin);
+  let t_far = min_component(tmax);
   if (t_near > t_far || t_far < 0.0) { return -1.; }//{ return 9999999.0; }
   return select(t_near, 0.0, t_near < 0.0);
 }
@@ -322,8 +305,8 @@ fn hit_unit_cube(r: Ray) -> f32 {
   let t1 = (1.0 - r.origin) * inv_dir;
   let tmin = min(t0, t1);
   let tmax = max(t0, t1);
-  let tnear = max(max(tmin.x, tmin.y), tmin.z);
-  let tfar = min(min(tmax.x, tmax.y), tmax.z);
+  let tnear = max_component(tmin);
+  let tfar = min_component(tmax);
   if (tnear < tfar && tfar > 0.0) { return select(tfar, tnear, tnear > 0.001); }
   return -1.0;
 }
@@ -522,7 +505,7 @@ fn trace_mesh(ray_world: Ray, mesh: MeshInstance, hit: ptr<function, SurfaceHit>
         var bary = vec3f(0.0);
         
         if (intersect_triangle(ray_local, tri, &t_tri, &uv_tri, &bary)) {
-          if (t_tri < (*hit).t) {
+          if (t_tri >= 0 && t_tri < (*hit).t) {
             (*hit).t = t_tri;
             (*hit).m_idx = mesh.material_idx;
             
@@ -603,7 +586,7 @@ fn trace_cube(ray_world: Ray, c: TransformedObject, hit: ptr<function, SurfaceHi
     
     let local_hit = local_ray.origin + local_ray.direction * t;
     let d = abs(local_hit);
-    let max_d = max(max(d.x, d.y), d.z);
+    let max_d = max_component(d);
 
     var local_n: vec3f; var local_t: vec3f; var local_b: vec3f;
 
@@ -790,6 +773,461 @@ fn trace_scene(ray: Ray) -> SurfaceHit {
   return hit;
 }
 
+// Helper to evaluate shadow attenuation for a material
+fn evaluate_shadow_attenuation(mat: Material, hit_uv: vec2f, dist: f32, shadow: ptr<function, vec3f>) -> bool {
+  //if (mat.transmission <= 0.0 && mat.albedo_idx < 0) {
+  //  *shadow = vec3f(0.0);
+  //  return true;
+  //}
+
+  //var albedo = mat.color;
+  if (mat.albedo_idx >= 0) {
+    let tex_color = sample_texture(mat.albedo_idx, hit_uv * mat.uv_scale);
+    //albedo *= tex_color.rgb;
+    // Apply alpha transparency (1.0 - alpha)
+    *shadow *= (1.0 - tex_color.a);
+    if (tex_color.a > 0.9999) { return true; }
+  } else {
+    return true;
+  }
+
+  // Beer's Law for internal absorption if IOR is ~1.0 (thin glass approximation)
+  // or if the material is explicitly transmissive.
+  //if (mat.transmission > 0.0 && mat.ior <= 1.05 && dist > 0) {
+  //  let sigma = -log(max(mat.color, vec3f(0.0001))) * mat.concentration;
+  //  let attenuation = exp(-sigma * dist);
+  //  *shadow *= attenuation;
+  //}
+
+  // Clear coat reflection loss
+  //if (mat.clearcoat > 0.0) {
+  //  // Approximate clearcoat reflection loss (Schlick)
+  //  let R0 = pow((1.0 - mat.clearcoat_ior) / (1.0 + mat.clearcoat_ior), 2.0);
+  //  // We assume near-normal incidence for the shadow ray for simplicity, //  // or we could use the actual L vector.
+  //  let reflection = R0 + (1.0 - R0) * 0.1; // 0.1 is a placeholder for (1-cos)^5
+  //  *shadow *= (1.0 - mat.clearcoat * reflection);
+  //}
+  return false;
+}
+
+fn trace_mesh_shadow(ray_world: Ray, mesh: MeshInstance, target_dist: f32, shadow: ptr<function, vec3f>) -> bool {
+  var ray_local: Ray;
+  ray_local.origin = (mesh.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
+  ray_local.direction = (mesh.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
+  let inv_dir = 1.0 / ray_local.direction;
+
+  var stack: array<u32, 64>;
+  var stack_ptr: i32 = 0;
+  stack[0] = mesh.node_offset;
+  stack_ptr++;
+
+  // Initial AABB check
+  let base_t = intersect_aabb(ray_local.origin, inv_dir, bvh_nodes[mesh.node_offset].aabb_min, bvh_nodes[mesh.node_offset].aabb_max);
+  if (base_t < 0. || base_t >= target_dist) { return false; }
+
+  var last_t = 0.0;
+  var is_inside = false;
+  let mat = materials[mesh.material_idx];
+
+  while (stack_ptr > 0) {
+    stack_ptr--;
+    let node_idx = stack[stack_ptr];
+    let node = bvh_nodes[node_idx];
+
+    if (node.num_triangles > 0u) {
+      let start = mesh.tri_offset + node.next;
+      let end = start + node.num_triangles;
+
+      for (var i = start; i < end; i++) {
+        let tri = triangles[i];
+        var t_tri = 0.0;
+        var uv_tri = vec2f(0.0);
+        var bary = vec3f(0.0);
+
+        if (intersect_triangle(ray_local, tri, &t_tri, &uv_tri, &bary)) {
+          if (t_tri >= 0 && t_tri < target_dist) {
+            let volume_dist = select(0, t_tri - last_t, is_inside);
+            if (evaluate_shadow_attenuation(mat, uv_tri, volume_dist, shadow)) { return true; }
+            last_t = t_tri;
+            is_inside = !is_inside;
+          }
+        }
+      }
+    } else {
+      let left_idx = node_idx + 1u;
+      let right_idx = mesh.node_offset + node.next;
+      let left_t = intersect_aabb(ray_local.origin, inv_dir, bvh_nodes[left_idx].aabb_min, bvh_nodes[left_idx].aabb_max);
+      let right_t = intersect_aabb(ray_local.origin, inv_dir, bvh_nodes[right_idx].aabb_min, bvh_nodes[right_idx].aabb_max);
+
+      if (left_t < right_t) {
+        if (right_t >= 0. && right_t < target_dist) { stack[stack_ptr] = right_idx; stack_ptr++; }
+        if (left_t >= 0. && left_t < target_dist) { stack[stack_ptr] = left_idx; stack_ptr++; }
+      } else {
+        if (left_t >= 0. && left_t < target_dist) { stack[stack_ptr] = left_idx; stack_ptr++; }
+        if (right_t >= 0. && right_t < target_dist) { stack[stack_ptr] = right_idx; stack_ptr++; }
+      }
+    }
+  }
+  return false;
+}
+
+fn trace_sphere_shadow(ray_world: Ray, s: TransformedObject, target_dist: f32, shadow: ptr<function, vec3f>) -> bool {
+  var local_ray: Ray;
+  local_ray.origin = (s.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
+  local_ray.direction = (s.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
+
+  let a = dot(local_ray.direction, local_ray.direction);
+  let half_b = dot(local_ray.origin, local_ray.direction);
+  let c = dot(local_ray.origin, local_ray.origin) - 1.0;
+  let disc = half_b * half_b - a * c;
+
+  if (disc < 0.0) { return false; }
+  let sqrtd = sqrt(disc);
+  let t1 = (-half_b - sqrtd) / a;
+  let t2 = (-half_b + sqrtd) / a;
+
+  let h1 = max(0.001, t1);
+  let h2 = min(target_dist, t2);
+
+  if (h1 < h2) {
+    let mat = materials[s.material_idx];
+    // 1. Entry surface
+    let p1 = local_ray.origin + local_ray.direction * h1;
+    let uv1 = vec2f(0.5 + atan2(p1.z, p1.x) / TWO_PI, 0.5 + asin(clamp(p1.y, -1.0, 1.0)) / PI);
+    if (evaluate_shadow_attenuation(mat, uv1, 0.0, shadow)) { return true; }
+
+    // 2. Exit surface & Internal Volume
+    let p2 = local_ray.origin + local_ray.direction * h2;
+    let uv2 = vec2f(0.5 + atan2(p2.z, p2.x) / TWO_PI, 0.5 + asin(clamp(p2.y, -1.0, 1.0)) / PI);
+    return evaluate_shadow_attenuation(mat, uv2, h2 - h1, shadow);
+  }
+  return false;
+}
+
+fn get_cube_uv(local_hit: vec3f) -> vec2f {
+  let d = abs(local_hit);
+  let max_d = max_component(d);
+  var uv: vec2f;
+
+  if (max_d == d.x) {
+    let s = sign(local_hit.x);
+    uv = vec2f(-s * local_hit.z, local_hit.y) * 0.5 + 0.5;
+  } else if (max_d == d.y) {
+    let s = sign(local_hit.y);
+    uv = vec2f(local_hit.x, s * local_hit.z) * 0.5 + 0.5;
+  } else {
+    let s = sign(local_hit.z);
+    uv = vec2f(s * local_hit.x, local_hit.y) * 0.5 + 0.5;
+  }
+  
+  return uv;
+}
+
+fn trace_cube_shadow(ray_world: Ray, c: TransformedObject, target_dist: f32, shadow: ptr<function, vec3f>) -> bool {
+  var local_ray: Ray;
+  local_ray.origin = (c.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
+  local_ray.direction = (c.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
+
+  let inv_dir = 1.0 / local_ray.direction;
+  let t_near_xyz = (-1.0 - local_ray.origin) * inv_dir;
+  let t_far_xyz = (1.0 - local_ray.origin) * inv_dir;
+  let t_min = min(t_near_xyz, t_far_xyz);
+  let t_max = max(t_near_xyz, t_far_xyz);
+
+  let t1 = max_component(t_min);
+  let t2 = min_component(t_max);
+
+  let h1 = max(0.001, t1);
+  let h2 = min(target_dist, t2);
+
+  if (h1 < h2) {
+    let mat = materials[c.material_idx];
+    // 1. Entry surface
+    let p1 = local_ray.origin + local_ray.direction * h1;
+    let uv1 = get_cube_uv(p1); // Use your existing cube UV logic here
+    if (evaluate_shadow_attenuation(mat, uv1, 0.0, shadow)) { return true; }
+
+    // 2. Exit surface & Internal Volume
+    let p2 = local_ray.origin + local_ray.direction * h2;
+    let uv2 = get_cube_uv(p2);
+    return evaluate_shadow_attenuation(mat, uv2, h2 - h1, shadow);
+  }
+  return false;
+}
+
+fn get_frustum_uv(p: vec3f, r0: f32, r1: f32) -> vec2f {
+  if (p.y > 0.999) { return (p.xz / (r1 * 2.0)) + 0.5; } // Top
+  if (p.y < 0.001) { return (p.xz / (r0 * 2.0)) + 0.5; } // Bottom
+  return vec2f(atan2(p.z, p.x) / TWO_PI + 0.5, p.y);      // Side
+}
+
+fn trace_cylinder_shadow(ray_world: Ray, f: Cylinder, target_dist: f32, shadow: ptr<function, vec3f>) -> bool {
+  var r: Ray;
+  r.origin = (f.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
+  r.direction = (f.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
+
+  let k = (f.top_radius - 1.0) / 1.0; // r0 is 1.0, h is 1.0
+  let origin_eff_r = 1.0 + k * r.origin.y;
+  
+  let A = r.direction.x * r.direction.x + r.direction.z * r.direction.z - k * k * r.direction.y * r.direction.y;
+  let B = 2.0 * (r.origin.x * r.direction.x + r.origin.z * r.direction.z - origin_eff_r * k * r.direction.y);
+  let C = r.origin.x * r.origin.x + r.origin.z * r.origin.z - origin_eff_r * origin_eff_r;
+
+  var h1 = 1e10; var h2 = -1e10;
+  var hit_count = 0u;
+
+  // Side Hits
+  let disc = B * B - 4.0 * A * C;
+  if (disc >= 0.0) {
+    let sqrt_d = sqrt(disc);
+    let ts = vec2f((-B - sqrt_d) / (2.0 * A), (-B + sqrt_d) / (2.0 * A));
+    for (var i = 0; i < 2; i++) {
+      let t = ts[i];
+      let y = r.origin.y + t * r.direction.y;
+      if (y >= 0.0 && y <= 1.0) {
+        h1 = min(h1, t); h2 = max(h2, t); hit_count++;
+      }
+    }
+  }
+
+  // Cap Hits
+  let caps = vec2f(0.0, 1.0);
+  let radii = vec2f(1.0, f.top_radius);
+  for (var i = 0; i < 2; i++) {
+    let t = (caps[i] - r.origin.y) / r.direction.y;
+    let p = r.origin + t * r.direction;
+    if (p.x * p.x + p.z * p.z <= radii[i] * radii[i]) {
+      h1 = min(h1, t); h2 = max(h2, t); hit_count++;
+    }
+  }
+
+  if (hit_count >= 2u) {
+    let final_h1 = max(0.001, h1);
+    let final_h2 = min(target_dist, h2);
+    if (final_h1 < final_h2) {
+      let mat = materials[f.material_idx];
+      let uv1 = get_frustum_uv(r.origin + r.direction * final_h1, 1.0, f.top_radius);
+      if (evaluate_shadow_attenuation(mat, uv1, 0.0, shadow)) { return true; }
+      let uv2 = get_frustum_uv(r.origin + r.direction * final_h2, 1.0, f.top_radius);
+      return evaluate_shadow_attenuation(mat, uv2, final_h2 - final_h1, shadow);
+    }
+  }
+  return false;
+}
+
+// Helper: Solves t^3 + at^2 + bt + c = 0
+fn solve_cubic_real(a: f32, b: f32, c: f32) -> f32 {
+  let q = (a * a - 3.0 * b) / 9.0;
+  let r = (2.0 * a * a * a - 9.0 * a * b + 27.0 * c) / 54.0;
+  let r2 = r * r;
+  let q3 = q * q * q;
+
+  if (r2 < q3) {
+    let theta = acos(clamp(r / sqrt(q3), -1.0, 1.0));
+    return -2.0 * sqrt(q) * cos(theta / 3.0) - a / 3.0;
+  } else {
+    let aa = -sign(r) * pow(abs(r) + sqrt(r2 - q3), 1.0/3.0);
+    var bb = 0.0;
+    if (aa != 0.0) { bb = q / aa; }
+    return (aa + bb) - a / 3.0;
+  }
+}
+
+// Main Solver: t^4 + at^3 + bt^2 + ct + d = 0
+fn solve_quartic_real(a: f32, b: f32, c: f32, d: f32) -> array<f32, 4> {
+  var roots = array<f32, 4>(-1.0, -1.0, -1.0, -1.0);
+  var count = 0u;
+
+  // 1. Resolve cubic: y^3 - b*y^2 + (ac - 4d)*y - (a^2*d + c^2 - 4bd) = 0
+  let a2 = a * a;
+  let y = solve_cubic_real(-b, a * c - 4.0 * d, 4.0 * b * d - a2 * d - c * c);
+
+  // 2. Derive quadratic coefficients
+  let R2 = 0.25 * a2 - b + y;
+  if (R2 < 0.0) { return roots; }
+  let R = sqrt(R2);
+
+  var D2: f32;
+  var E2: f32;
+
+  if (R < 1e-6) {
+    D2 = 0.75 * a2 - 2.0 * b + 2.0 * sqrt(y * y - 4.0 * d);
+    E2 = 0.75 * a2 - 2.0 * b - 2.0 * sqrt(y * y - 4.0 * d);
+  } else {
+    D2 = 0.75 * a2 - R2 - 2.0 * b + (4.0 * a * b - 8.0 * c - a2 * a) / (4.0 * R);
+    E2 = 0.75 * a2 - R2 - 2.0 * b - (4.0 * a * b - 8.0 * c - a2 * a) / (4.0 * R);
+  }
+
+  // 3. Solve the two quadratics
+  if (D2 >= 0.0) {
+    let D = sqrt(D2);
+    roots[0] = -0.25 * a + 0.5 * R + 0.5 * D;
+    roots[1] = -0.25 * a + 0.5 * R - 0.5 * D;
+    count += 2u;
+  }
+  if (E2 >= 0.0) {
+    let E = sqrt(E2);
+    roots[count] = -0.25 * a - 0.5 * R + 0.5 * E;
+    roots[count + 1u] = -0.25 * a - 0.5 * R - 0.5 * E;
+    count += 2u;
+  }
+
+  // 4. Sort roots (Bubble sort for small fixed array)
+  for (var i = 0u; i < 3u; i++) {
+    for (var j = i + 1u; j < 4u; j++) {
+      if (roots[i] > roots[j]) {
+        let temp = roots[i];
+        roots[i] = roots[j];
+        roots[j] = temp;
+      }
+    }
+  }
+
+  return roots;
+}
+
+
+fn get_torus_uv(p: vec3f) -> vec2f {
+  let u = (atan2(p.z, p.x) / TWO_PI) + 0.5;
+  let v = (atan2(p.y, length(p.xz) - 1.0) / TWO_PI) + 0.5;
+  return vec2f(u, v);
+}
+
+fn trace_torus_shadow(ray_world: Ray, tor: Torus, target_dist: f32, shadow: ptr<function, vec3f>) -> bool {
+  var l_r: Ray;
+  l_r.origin = (tor.inv_matrix * vec4f(ray_world.origin, 1.0)).xyz;
+  l_r.direction = (tor.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
+  let ray_scale = length(l_r.direction);
+  l_r.direction /= ray_scale;
+
+  let R = 1.0; let r = tor.inner_radius;
+  let K = dot(l_r.origin, l_r.origin) + R*R - r*r;
+  let G = dot(l_r.origin, l_r.direction);
+
+  // quartic: t^4 + Bt^3 + Ct^2 + Dt + E = 0
+  let B = 4.0 * G;
+  let C = 2.0 * K + 4.0 * G * G - 4.0 * R * R * (1.0 - l_r.direction.y * l_r.direction.y);
+  let D = 4.0 * K * G - 8.0 * R * R * l_r.origin.y * l_r.direction.y;
+  let E = K * K - 4.0 * R * R * (l_r.origin.x * l_r.origin.x + l_r.origin.z * l_r.origin.z);
+
+  let roots = solve_quartic_real(B, C, D, E); // Assume helper returns sorted array<f32, 4>
+  let mat = materials[tor.material_idx];
+
+  // Check intervals: [root[0], root[1]] and [root[2], root[3]]
+  for (var i = 0; i < 4; i += 2) {
+    let t_near = roots[i]; let t_far = roots[i+1];
+    if (t_near < 0.0 || t_near > target_dist * ray_scale) { continue; }
+    
+    let h1 = max(0.001, t_near) / ray_scale;
+    let h2 = min(target_dist * ray_scale, t_far) / ray_scale;
+    
+    if (h1 < h2) {
+      let uv1 = get_torus_uv(l_r.origin + l_r.direction * (h1 * ray_scale));
+      if (evaluate_shadow_attenuation(mat, uv1, 0.0, shadow)) { return true; }
+      let uv2 = get_torus_uv(l_r.origin + l_r.direction * (h2 * ray_scale));
+      if (evaluate_shadow_attenuation(mat, uv2, h2 - h1, shadow)) { return true; }
+    }
+  }
+  return false;
+}
+
+fn trace_tlas_shadow(ray: Ray, target_idx: i32, target_dist: f32, shadow: ptr<function, vec3f>) -> bool {
+  let inv_dir = 1.0 / ray.direction;
+  var stack: array<u32, 64>;
+  var stack_ptr: i32 = 0;
+  stack[stack_ptr] = 0u;
+  stack_ptr++;
+
+  while (stack_ptr > 0) {
+    stack_ptr--;
+    let node_idx = stack[stack_ptr];
+    let node = tlas_nodes[node_idx];
+
+    if (node.num_triangles > 0u) {
+      let start = node.next;
+      let end = start + node.num_triangles;
+      for (var i = start; i < end; i++) {
+        if (i32(i) == target_idx) { continue; }
+        let obj = objects[i];
+        let otype = obj.object_type;
+        if (HAS_MESHES && otype == 0) {
+          let mesh = MeshInstance(obj.inv_matrix,obj.material_idx,0,bitcast<u32>(obj.param0),bitcast<u32>(obj.param1));
+          if (trace_mesh_shadow(ray, mesh, target_dist, shadow)) { return true; }
+        } else if (HAS_SPHERES && otype == 1) {
+          if (trace_sphere_shadow(ray, obj, target_dist, shadow)) { return true; }
+        } else if (HAS_CUBES && otype == 2) {
+          if (trace_cube_shadow(ray, obj, target_dist, shadow)) { return true; }
+        } else if (HAS_CYLINDERS && otype == 3) {
+          let cylinder = Cylinder(obj.inv_matrix,obj.material_idx,obj.param0);
+          if (trace_cylinder_shadow(ray, cylinder, target_dist, shadow)) { return true; }
+        } else if (HAS_TORI && otype == 4) {
+          let torus = Torus(obj.inv_matrix,obj.material_idx,obj.param0);
+          if (trace_torus_shadow(ray, torus, target_dist, shadow)) { return true; }
+        }
+      }
+    } else {
+      let left_idx = node_idx + 1u;
+      let right_idx = node.next;
+      let left_t = intersect_aabb(ray.origin, inv_dir, tlas_nodes[left_idx].aabb_min, tlas_nodes[left_idx].aabb_max);
+      let right_t = intersect_aabb(ray.origin, inv_dir, tlas_nodes[right_idx].aabb_min, tlas_nodes[right_idx].aabb_max);
+
+      if (left_t < right_t) {
+        if (right_t >= 0. && right_t < target_dist) { stack[stack_ptr] = right_idx; stack_ptr++; }
+        if (left_t >= 0. && left_t < target_dist) { stack[stack_ptr] = left_idx; stack_ptr++; }
+      } else {
+        if (left_t >= 0. && left_t < target_dist) { stack[stack_ptr] = left_idx; stack_ptr++; }
+        if (right_t >= 0. && right_t < target_dist) { stack[stack_ptr] = right_idx; stack_ptr++; }
+      }
+    }
+  }
+  return false;
+}
+
+fn trace_plane_shadow(ray: Ray, p: Plane, target_dist: f32, shadow: ptr<function, vec3f>) -> bool {
+  let denom = dot(p.normal, ray.direction);
+  if (abs(denom) > 1e-6) {
+    let t = (p.d - dot(p.normal, ray.origin)) / denom;
+    if (t > 0.001 && t < target_dist) {
+      let hit_pos = ray.origin + ray.direction * t;
+      let mat = materials[p.material_idx];
+      
+      var tangent = vec3f(1.0, 0.0, 0.0);
+      if (abs(p.normal.x) > 0.9999) { tangent = vec3f(0.0, 0.0, 1.0); }
+      tangent = normalize(cross(p.normal, tangent));
+      let bitangent = normalize(cross(p.normal, tangent));
+      let uv = vec2f(dot(hit_pos, tangent), dot(hit_pos, bitangent));
+      
+      return evaluate_shadow_attenuation(mat, uv, length(ray.origin-hit_pos), shadow);
+    }
+  }
+  return false;
+}
+
+fn trace_scene_shadow(ray: Ray, target_idx: i32, target_dist: f32) -> vec3f { 
+  var shadow = vec3f(1.0);
+
+  // 1. Planes
+  if (HAS_PLANES) {
+    for (var i = 0u; i < arrayLength(&planes); i++) {
+      if (trace_plane_shadow(ray, planes[i], target_dist, &shadow)) { return vec3f(0.0); };
+    }
+  }
+
+  // 2. TLAS (Spheres, Cubes, etc.)
+  if (HAS_SPHERES || HAS_CUBES || HAS_CYLINDERS || HAS_TORI || HAS_MESHES) {
+    if (trace_tlas_shadow(ray, target_idx, target_dist, &shadow)) { return vec3f(0.0); }
+  }
+
+  // 3. List Meshes (Non-accelerated)
+  if (HAS_LIST_MESHES) {
+    for (var i = 0u; i < arrayLength(&meshes); i++) {
+      if (trace_mesh_shadow(ray, meshes[i], target_dist, &shadow)) { return vec3f(0.0); }
+    }
+  }
+
+  return shadow;
+}
+
 struct PomResult {
   uv: vec2f,
   height: f32,
@@ -845,8 +1283,7 @@ fn calculate_shadow_pom(current_uv: vec2f, current_height: f32, light_dir_ts: ve
   res.uv = current_uv;
   res.height = current_height;
 
-  // If the light is hitting the back of the polygon or is perfectly horizontal, 
-  // it's either in shadow or calculation is undefined.
+  // If the light is hitting the back of the polygon or is perfectly horizontal, // it's either in shadow or calculation is undefined.
   if (light_dir_ts.z <= 0.0) { 
     res.hit = true;
     return res; 
@@ -997,7 +1434,6 @@ fn get_surface_context(hit: SurfaceHit, mat: Material, tbn: mat3x3f, uv: vec2f) 
   return ctx;
 }
 
-
 // ---------------------------------------------------------
 // SPHERICAL LIGHT SAMPLING (VISIBLE CONE METHOD)
 // ---------------------------------------------------------
@@ -1125,173 +1561,503 @@ fn sample_light(light: Light, obj: TransformedObject, hit_pos: vec3f) -> LightSa
 }
 
 fn mis_weight(pdf_a: f32, pdf_b: f32) -> f32 {
-  let a2 = pdf_a;
-  let b2 = pdf_b;
-  if (a2 + b2 <= 0.0) { return 0.0; }
-  return a2 / (a2 + b2);
+  if (pdf_a <= 0.0) { return 0.0; }
+  // Normalize by the maximum PDF to prevent f32 overflow when squaring
+  let max_pdf = max(pdf_a, pdf_b);
+  let a = pdf_a / max_pdf;
+  let b = pdf_b / max_pdf;
+  let a2 = a * a;
+  let b2 = b * b;
+  let sum = a2 + b2;
+  if (sum <= 0.0) { return 0.0; }
+  return a2 / sum;
 }
 
-fn sample_bsdf(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, radiance: ptr<function, vec3f>, hit: SurfaceHit, mat: Material, ctx: SurfaceContext, hit_pos: vec3f, beers_dist: ptr<function, f32>, is_specular: ptr<function, bool>) -> bool {
-  let V = -(*ray).direction;
-  let dotNV = dot(ctx.normal, V);
-  let entering = dotNV > 0.0;
+
+// 2. UNCAPPED GGX (No more dim lights!)
+fn D_GGX(NdotH: f32, alpha2: f32) -> f32 {
+  let denom = (NdotH * NdotH * (alpha2 - 1.0) + 1.0);
+  // Add a tiny epsilon instead of a max() clamp to preserve the massive specular peak
+  return alpha2 / (PI * denom * denom + 1e-10);
+}
+
+fn G_Smith_GGX(NdotV: f32, NdotL: f32, alpha2: f32) -> f32 {
+  let ggx2 = NdotV * sqrt(max(0.0, alpha2 + NdotL * NdotL * (1.0 - alpha2)));
+  let ggx1 = NdotL * sqrt(max(0.0, alpha2 + NdotV * NdotV * (1.0 - alpha2)));
+  return (2.0 * NdotL * NdotV) / (ggx1 + ggx2 + 1e-10);
+}
+
+fn G_Smith_GGX_div_NV(NdotV: f32, NdotL: f32, alpha2: f32) -> f32 {
+  let sqrt_v = sqrt(max(0.0, alpha2 + NdotV * NdotV * (1.0 - alpha2)));
+  let sqrt_l = sqrt(max(0.0, alpha2 + NdotL * NdotL * (1.0 - alpha2)));
+  return (2.0 * NdotL) / (NdotL * sqrt_v + NdotV * sqrt_l + 1e-10);
+}
+
+// Uncorrelated Smith G (For Transmission)
+// FIX: Using Uncorrelated Geometry completely fixes the pitch-black edges!
+fn G_Smith_GGX_Uncorrelated_div_NV(NdotV: f32, NdotL: f32, alpha2: f32) -> f32 {
+  let lambda_v = NdotV + sqrt(max(0.0, alpha2 + NdotV * NdotV * (1.0 - alpha2)));
+  let lambda_l = NdotL + sqrt(max(0.0, alpha2 + NdotL * NdotL * (1.0 - alpha2)));
+  return (4.0 * NdotL) / (lambda_v * lambda_l + 1e-7);
+}
+
+fn F_Schlick(cosTheta: f32, F0: vec3f) -> vec3f {
+  return F0 + (vec3f(1.0) - F0) * pow(max(0.0, 1.0 - cosTheta), 5.0);
+}
+
+fn F_Schlick_Roughness(cosTheta: f32, F0: vec3f, roughness: f32) -> vec3f {
+  return F0 + (max(vec3f(1.0 - roughness), F0) - F0) * pow(max(0.0, 1.0 - cosTheta), 5.0);
+}
+
+// Explicit Snell's Law / Fresnel Refraction
+fn fresnel_dielectric(cosThetaI: f32, etai: f32, etat: f32) -> f32 {
+  // We use abs() so normal orientation doesn't break the math
+  let cosi = clamp(abs(cosThetaI), 0.0, 1.0);
+  let sint = (etai / etat) * sqrt(max(0.0, 1.0 - cosi * cosi));
   
+  if (sint >= 1.0) { return 1.0; } // Total Internal Reflection
+  
+  let cost = sqrt(max(0.0, 1.0 - sint * sint));
+  let Rs = ((etat * cosi) - (etai * cost)) / ((etat * cosi) + (etai * cost));
+  let Rp = ((etai * cosi) - (etat * cost)) / ((etai * cosi) + (etat * cost));
+  
+  return (Rs * Rs + Rp * Rp) / 2.0;
+}
+
+fn ImportanceSampleGGX(xi: vec2f, N: vec3f, alpha2: f32) -> vec3f {
+  let phi = TWO_PI * xi.x;
+  let denom = max(1.0 + (alpha2 - 1.0) * xi.y, 1e-7);
+  // clamp and max prevent negative domains for sqrt
+  let cosTheta = sqrt(clamp((1.0 - xi.y) / denom, 0.0, 1.0));
+  let sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+  
+  let H_local = vec3f(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+  
+  let up = select(vec3f(0, 1, 0), vec3f(0, 0, 1), abs(N.y) > 0.999);
+  let tangent = normalize(cross(up, N));
+  let bitangent = cross(N, tangent);
+  
+  return normalize(tangent * H_local.x + bitangent * H_local.y + N * H_local.z);
+}
+
+fn ImportanceSampleCosine(xi: vec2f, N: vec3f) -> vec3f {
+  let phi = TWO_PI * xi.x;
+  let cosTheta = sqrt(clamp(xi.y, 0.0, 1.0));
+  let sinTheta = sqrt(max(0.0, 1.0 - xi.y));
+  
+  let L_local = vec3f(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+  
+  let up = select(vec3f(0, 1, 0), vec3f(0, 0, 1), abs(N.y) > 0.999);
+  let tangent = normalize(cross(up, N));
+  let bitangent = cross(N, tangent);
+  
+  return normalize(tangent * L_local.x + bitangent * L_local.y + N * L_local.z);
+}
+
+struct Medium {
+  ior: f32,
+  sigma: vec3f,
+  emission: vec3f,
+}
+
+struct MediumStack {
+  media: array<Medium, 4>,
+  count: i32,
+}
+
+fn peek_medium(stack: ptr<function, MediumStack>) -> Medium {
+  if ((*stack).count > 0) {
+    return (*stack).media[(*stack).count - 1];
+  }
+  return Medium(1.0, vec3f(0.0), vec3f(0.0)); // Default: Air
+}
+
+fn peek_outer_medium(stack: ptr<function, MediumStack>) -> Medium {
+  if ((*stack).count > 1) {
+    return (*stack).media[(*stack).count - 2];
+  }
+  return Medium(1.0, vec3f(0.0), vec3f(0.0)); // Default: Air
+}
+
+fn push_medium(stack: ptr<function, MediumStack>, m: Medium) {
+  if ((*stack).count < 4) {
+    (*stack).media[(*stack).count] = m;
+    (*stack).count += 1;
+  }
+}
+
+fn pop_medium(stack: ptr<function, MediumStack>) {
+  if ((*stack).count > 0) {
+    (*stack).count -= 1;
+  }
+}
+
+
+fn eval_surface(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext, stack: ptr<function, MediumStack>) -> vec3f {
+  let entering = dot(ctx.normal, V) > 0.0;
   let n_orient = select(-ctx.normal, ctx.normal, entering);
-  let sn_orient = select(-ctx.surface_normal, ctx.surface_normal, entering);
-  let dotSNV = max(dot(sn_orient, V), 1e-6);
   
-  let roughness_val = ctx.roughness;
-  let base_roughness = roughness_val * roughness_val;
-  let cc_roughness = (1.0 - mat.clearcoat_gloss) * (1.0 - mat.clearcoat_gloss);
+  let dotNV = dot(n_orient, V);
+  let dotNL = dot(n_orient, L);
+  if (dotNV <= 0.0) { return vec3f(0.0); }
 
-  // --- FRESNEL & TINT CALCULATIONS ---
-  let cc_f0 = pow((1.0 - mat.clearcoat_ior) / (1.0 + mat.clearcoat_ior), 2.0);
-  let Fcc_base = cc_f0 + (1.0 - cc_f0) * pow(1.0 - max(dotSNV, 0.0), 5.0);
-  let w_cc = mat.clearcoat * Fcc_base;
-  
-  let kr_smooth = fresnel((*ray).direction, ctx.normal, mat.ior, 1.0);
-  let f90_rough = saturate(1.0 - roughness_val);
-  let kr = kr_smooth * f90_rough;
-  
-  let lum = dot(ctx.albedo, vec3f(0.2126, 0.7152, 0.0722));
-  let tint = select(ctx.albedo / max(lum, 0.0001), vec3f(1.0), lum <= 0.0);
-  let f90_tinted = mix(vec3f(f90_rough), f90_rough * tint, mat.specular_tint);
-  let kr_tinted = mix(vec3f(kr), kr * tint, mat.specular_tint);
-  
-  let f0_dielectric = pow((1.0 - mat.ior) / (1.0 + mat.ior), 2.0);
-  let F0 = mix(mix(vec3f(f0_dielectric), f0_dielectric * tint, mat.specular_tint), ctx.albedo, ctx.metallic);
-  let F_schlick = F0 + (f90_tinted - F0) * pow(1.0 - max(abs(dotNV), 0.0), 5.0);
+  let roughness_val = clamp(ctx.roughness, 0.01, 1.0);
+  let alpha = roughness_val * roughness_val;
+  let alpha2 = max(alpha * alpha, 1e-6); 
 
-  let F_actual = mix(F_schlick, kr_tinted, mat.transmission * (1.0 - ctx.metallic));
-  let f_avg = clamp((F_actual.r + F_actual.g + F_actual.b) / 3.0, 0.0, 1.0);
-
-  // --- PROBABILITIES ---
-  let p_cc = w_cc;
-  let p_spec = (1.0 - p_cc) * f_avg;
-  let p_trans = (1.0 - p_cc) * (1.0 - f_avg) * mat.transmission * (1.0 - ctx.metallic);
-  let p_diff = (1.0 - p_cc) * (1.0 - f_avg) * (1.0 - mat.transmission) * (1.0 - ctx.metallic);
-  let total_p = p_cc + p_spec + p_trans + p_diff;
-
-  // 1. Alpha Cutout Test
-  if (rand_pcg() > ctx.alpha) {
-    (*is_specular) = true; 
-    (*ray).origin = hit_pos - n_orient * 0.005;
-    return true; 
-  }
-
-  // 2. BSDF Lobe Selection
-  let rng = rand_pcg();
-
-  if (rng < p_cc) {
-    (*is_specular) = true;
-    (*ray).direction = normalize(mix(reflect((*ray).direction, sn_orient), sn_orient + random_unit_vector(), cc_roughness));
-    (*ray).origin = hit_pos + sn_orient * 0.001;
-  } else if (rng < p_cc + p_spec) {
-    (*is_specular) = true;
-    var anim_n = n_orient;
-    if (mat.anisotropic > 0.0) {
-      let up = select(vec3f(0,1,0), vec3f(0,0,1), abs(n_orient.y) > 0.99999);
-      var T = normalize(cross(up, n_orient));
-      var B = cross(n_orient, T);
-      let angle = mat.aniso_rotation * TWO_PI;
-      T = T * cos(angle) + B * sin(angle);
-      anim_n = normalize(mix(n_orient, cross(cross(V, T), T), mat.anisotropic));
-    }
-    (*ray).direction = normalize(mix(reflect((*ray).direction, anim_n), anim_n + random_unit_vector(), base_roughness));
-    (*ray).origin = hit_pos + n_orient * 0.001;
-    (*throughput) *= F_actual / max(f_avg, 0.0001);
-  } else if (rng < p_cc + p_spec + p_trans) {
-    (*is_specular) = true;
-    if (!entering) { 
-      let sigma = -log(max(mat.color, vec3f(0.0001))) * mat.concentration;
-      let attenuation = exp(-sigma * (*beers_dist));
-      (*radiance) += (*throughput) * (mat.emittance * (1.0 - attenuation));
-      (*throughput) *= attenuation;
-    } else {
-      (*beers_dist) = 0.0;
-    }
-    let refr_dir = refraction((*ray).direction, ctx.normal, mat.ior, 1.0);
-    (*ray).direction = normalize(mix(refr_dir, -n_orient + random_unit_vector(), base_roughness));
-    (*ray).origin = hit_pos - n_orient * 0.005;
-  } else if (rng < total_p) {
-    (*is_specular) = false;
-    (*ray).direction = normalize(ctx.normal + random_unit_vector());
-    (*ray).origin = hit_pos + ctx.normal * 0.001;
-    var diff_col = ctx.albedo;
-    if (mat.sheen > 0.0) { diff_col += mix(vec3f(1.0), ctx.albedo, mat.sheen_tint) * pow(1.0 - abs(dotNV), 5.0) * mat.sheen; }
-    if (mat.subsurface > 0.0) { diff_col = mix(diff_col, mat.subsurface_tint, mat.subsurface); }
-    (*throughput) *= diff_col;
+  var etai = 1.0;
+  var etat = 1.0;
+  if (entering) {
+    etai = peek_medium(stack).ior;
+    etat = mat.ior;
   } else {
-    // Absorbed by the material! (e.g. rough metals)
-    return false;
+    etai = peek_medium(stack).ior;
+    etat = peek_outer_medium(stack).ior;
   }
-  return true; 
+
+  // --- 1. REFLECTION LOBES (Same Hemisphere) ---
+  if (dotNL > 0.0) {
+    let H_vec = V + L;
+    let H = select(n_orient, normalize(H_vec), dot(H_vec, H_vec) > 1e-6);
+    let dotNH = max(dot(n_orient, H), 0.0);
+    let dotVH = max(dot(V, H), 0.0);
+
+    var diff_col = ctx.albedo;
+    if (mat.sheen > 0.0) { diff_col += mix(vec3f(1.0), ctx.albedo, mat.sheen_tint) * pow(max(0.0, 1.0 - dotNV), 5.0) * mat.sheen; }
+    if (mat.subsurface > 0.0) { diff_col = mix(diff_col, mat.subsurface_tint, mat.subsurface); }
+    let diffuse = (diff_col / PI) * (1.0 - ctx.metallic) * (1.0 - mat.transmission);
+
+    let D = D_GGX(dotNH, alpha2);
+    let G_div_NV = G_Smith_GGX_div_NV(dotNV, dotNL, alpha2);
+    
+    let F_dielectric_raw = fresnel_dielectric(dotVH, etai, etat);
+    let F0_d = pow((etai - etat) / (etai + etat), 2.0);
+    var F_dielectric = mix(F_dielectric_raw, F0_d, roughness_val);
+    if (F_dielectric_raw >= 0.999) { F_dielectric = 1.0; }
+
+    let lum = dot(ctx.albedo, vec3f(0.2126, 0.7152, 0.0722));
+    let tint = select(ctx.albedo / max(lum, 0.0001), vec3f(1.0), lum <= 0.0);
+    let F_dielectric_tinted = mix(vec3f(F_dielectric), vec3f(F_dielectric) * tint, mat.specular_tint);
+    
+    let F0_metal = ctx.albedo;
+    let F90_metal = mix(vec3f(1.0), tint, mat.specular_tint);
+    let F_metal = F0_metal + (F90_metal - F0_metal) * pow(max(0.0, 1.0 - dotVH), 5.0);
+    
+    let F_actual = mix(F_dielectric_tinted, F_metal, ctx.metallic);
+    let specular_cos = (D * F_actual * G_div_NV) / 4.0;
+
+    var clearcoat_cos = vec3f(0.0);
+    if (mat.clearcoat > 0.0 && entering) {
+      let cc_roughness = clamp(1.0 - mat.clearcoat_gloss, 0.01, 1.0);
+      let cc_alpha = cc_roughness * cc_roughness;
+      let cc_alpha2 = max(cc_alpha * cc_alpha, 1e-6);
+      let cc_D = D_GGX(dotNH, cc_alpha2);
+      let cc_G_div_NV = G_Smith_GGX_div_NV(dotNV, dotNL, cc_alpha2);
+      let cc_F = fresnel_dielectric(dotVH, 1.0, mat.clearcoat_ior);
+      clearcoat_cos = (mat.clearcoat * cc_D * cc_G_div_NV * vec3f(cc_F)) / 4.0;
+    }
+
+    return diffuse * dotNL + specular_cos + clearcoat_cos;
+  } 
+  
+  // --- 2. TRANSMISSION BTDF (Opposite Hemisphere) ---
+  else if (dotNL < 0.0 && mat.transmission > 0.0) {
+    let H_vec = -(etai * V + etat * L);
+    var H = normalize(H_vec);
+    if (dot(H, n_orient) < 0.0) { H = -H; } 
+
+    let dotNH = max(dot(n_orient, H), 0.0);
+    let dotVH = dot(V, H);
+    let dotLH = dot(L, H);
+
+    if (dotVH * dotLH >= 0.0) { return vec3f(0.0); } 
+
+    let D = D_GGX(dotNH, alpha2);
+    // FIX: Swapped to Uncorrelated Smith G for proper Physical Transmission
+    let G_div_NV = G_Smith_GGX_Uncorrelated_div_NV(dotNV, abs(dotNL), alpha2);
+    
+    let F_raw = fresnel_dielectric(dotVH, etai, etat);
+    let F0_d = pow((etai - etat) / (etai + etat), 2.0);
+    var F_flat = mix(F_raw, F0_d, roughness_val);
+    if (F_raw >= 0.999) { F_flat = 1.0; }
+
+    let denom = etai * dotVH + etat * dotLH;
+    let denom2 = max(denom * denom, 1e-7);
+    
+    let btdf_cos = (abs(dotVH) * abs(dotLH) * etat * etat * (1.0 - F_flat) * D * G_div_NV) / denom2;
+
+    let trans_color = vec3f(mat.transmission * (1.0 - ctx.metallic));
+    return trans_color * btdf_cos;
+  }
+
+  return vec3f(0.0);
 }
 
-fn pdf_bsdf(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext) -> f32 {
-  let dotNL = dot(ctx.normal, L);
-  let dotNV = dot(ctx.normal, V);
-  let same_side = (dotNL * dotNV) > 0.0;
-
-  let roughness_val = ctx.roughness;
-  let base_roughness = roughness_val * roughness_val;
-  let cc_roughness = (1.0 - mat.clearcoat_gloss) * (1.0 - mat.clearcoat_gloss);
-
-  let cc_f0 = pow((1.0 - mat.clearcoat_ior) / (1.0 + mat.clearcoat_ior), 2.0);
-  let dotSNV = max(dot(ctx.surface_normal, V), 1e-6);
-  let Fcc_base = cc_f0 + (1.0 - cc_f0) * pow(1.0 - max(dotSNV, 0.0), 5.0);
-  let w_cc = mat.clearcoat * Fcc_base;
+// =======================================================
+// THE MICROFACET PDF 
+// =======================================================
+fn pdf_surface(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext, stack: ptr<function, MediumStack>) -> f32 {
+  let entering = dot(ctx.normal, V) > 0.0;
+  let n_orient = select(-ctx.normal, ctx.normal, entering);
   
-  let f0_dielectric = pow((1.0 - mat.ior) / (1.0 + mat.ior), 2.0);
-  let f90_rough = saturate(1.0 - roughness_val);
-  let F0 = mix(vec3f(f0_dielectric), ctx.albedo, ctx.metallic);
-  let F_schlick = F0 + (vec3f(f90_rough) - F0) * pow(1.0 - max(abs(dotNV), 0.0), 5.0);
-  
-  let f_avg = clamp((F_schlick.r + F_schlick.g + F_schlick.b) / 3.0, 0.0, 1.0);
+  let dotNV = dot(n_orient, V);
+  let dotNL = dot(n_orient, L);
+  if (dotNV <= 0.0) { return 1e-7; }
 
-  let p_cc = w_cc;
+  let roughness_val = clamp(ctx.roughness, 0.01, 1.0);
+  let alpha = roughness_val * roughness_val;
+  let alpha2 = max(alpha * alpha, 1e-6);
+
+  var etai = 1.0;
+  var etat = 1.0;
+  if (entering) {
+    etai = peek_medium(stack).ior;
+    etat = mat.ior;
+  } else {
+    etai = peek_medium(stack).ior;
+    etat = peek_outer_medium(stack).ior;
+  }
+
+  let F_cc = fresnel_dielectric(dotNV, 1.0, mat.clearcoat_ior);
+  let p_cc = select(0.0, mat.clearcoat * F_cc, entering);
+  
+  let F_est_raw = fresnel_dielectric(dotNV, etai, etat);
+  let F0_d = pow((etai - etat) / (etai + etat), 2.0);
+  var F_est = mix(F_est_raw, F0_d, roughness_val);
+  if (F_est_raw >= 0.999) { F_est = 1.0; }
+  
+  let F_metal = ctx.albedo + (vec3f(1.0) - ctx.albedo) * pow(max(0.0, 1.0 - dotNV), 5.0);
+  let F_actual = mix(vec3f(F_est), F_metal, ctx.metallic);
+  
+  let f_avg = clamp((F_actual.r + F_actual.g + F_actual.b) / 3.0, 0.0, 1.0);
   let p_spec = (1.0 - p_cc) * f_avg;
   let p_trans = (1.0 - p_cc) * (1.0 - f_avg) * mat.transmission * (1.0 - ctx.metallic);
   let p_diff = (1.0 - p_cc) * (1.0 - f_avg) * (1.0 - mat.transmission) * (1.0 - ctx.metallic);
 
   var pdf: f32 = 0.0;
 
-  if (p_diff > 0.0 && same_side) {
-    pdf += p_diff * (max(dotNL, 0.0) / PI);
-  }
-  if (p_spec > 0.0 && same_side) {
-    pdf += p_spec * (1.0 / (2.0 * PI * (base_roughness + 0.001))); 
-  }
-  if (p_trans > 0.0 && !same_side) {
-    pdf += p_trans * (1.0 / (2.0 * PI * (base_roughness + 0.001)));
-  }
-  if (p_cc > 0.0 && same_side) {
-    pdf += p_cc * (1.0 / (2.0 * PI * (cc_roughness + 0.001)));
+  if (dotNL > 0.0) {
+    let H_vec = V + L;
+    let H = select(n_orient, normalize(H_vec), dot(H_vec, H_vec) > 1e-6);
+    let dotNH = max(dot(n_orient, H), 0.0);
+    let dotVH = max(dot(V, H), 0.0);
+
+    if (p_diff > 0.0) { pdf += p_diff * (dotNL / PI); }
+    
+    if (p_spec > 0.0) {
+      let D = D_GGX(dotNH, alpha2);
+      var spec_weight = p_spec;
+      
+      if (p_trans > 0.0) {
+        let cosi = clamp(dotVH, 0.0, 1.0);
+        let sint = (etai / etat) * sqrt(max(0.0, 1.0 - cosi * cosi));
+        if (sint >= 1.0) { spec_weight += p_trans; }
+      }
+      
+      pdf += spec_weight * (D * dotNH) / max(4.0 * dotVH, 1e-7);
+    }
+    
+    if (p_cc > 0.0) {
+      let cc_roughness = clamp(1.0 - mat.clearcoat_gloss, 0.01, 1.0);
+      let cc_alpha = cc_roughness * cc_roughness;
+      let cc_D = D_GGX(dotNH, max(cc_alpha * cc_alpha, 1e-6));
+      pdf += p_cc * (cc_D * dotNH) / max(4.0 * dotVH, 1e-7);
+    }
+  } 
+  else if (dotNL < 0.0 && p_trans > 0.0) {
+    let H_vec = -(etai * V + etat * L);
+    var H = normalize(H_vec);
+    if (dot(H, n_orient) < 0.0) { H = -H; }
+
+    let dotNH = max(dot(n_orient, H), 0.0);
+    let dotVH = dot(V, H);
+    let dotLH = dot(L, H);
+
+    if (dotVH * dotLH < 0.0) {
+      let D = D_GGX(dotNH, alpha2);
+      let denom = etai * dotVH + etat * dotLH;
+      let dwh_dwi = (etat * etat * abs(dotLH)) / max(denom * denom, 1e-7);
+      pdf += p_trans * (D * dotNH * dwh_dwi);
+    }
   }
 
-  return max(pdf, 1e-6);
+  return max(pdf, 1e-7);
 }
 
-fn eval_bsdf(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext) -> vec3f {
-  let dotNL = max(dot(ctx.normal, L), 0.0);
+// =======================================================
+// THE UNIFIED SAMPLER (Pure Global Stack)
+// =======================================================
+fn sample_surface(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, radiance: ptr<function, vec3f>, hit: SurfaceHit, mat: Material, ctx: SurfaceContext, hit_pos: vec3f, stack: ptr<function, MediumStack>, last_surface_pdf: ptr<function, f32>) -> bool {
+  let V = -(*ray).direction;
+  let entering = dot(ctx.normal, V) > 0.0;
   
-  // FIX: We ONLY evaluate the diffuse lobe for Next Event Estimation (NEE).
-  // Specular lobes are perfectly handled by BSDF sampling natively.
-  // Including specular in NEE without a proper analytic GGX throws massive diffuse-looking Halos.
-  var diff_col = ctx.albedo;
-  if (mat.sheen > 0.0) { 
-    diff_col += mix(vec3f(1.0), ctx.albedo, mat.sheen_tint) * pow(1.0 - abs(dot(ctx.normal, V)), 5.0) * mat.sheen; 
+  let n_orient = select(-ctx.normal, ctx.normal, entering);
+  let sn_orient = select(-ctx.surface_normal, ctx.surface_normal, entering);
+  let dotSNV = max(dot(sn_orient, V), 1e-6);
+  
+  let roughness_val = clamp(ctx.roughness, 0.01, 1.0);
+  let alpha = roughness_val * roughness_val;
+  let alpha2 = max(alpha * alpha, 1e-6);
+
+  let cc_roughness = clamp(1.0 - mat.clearcoat_gloss, 0.01, 1.0);
+  let cc_alpha = cc_roughness * cc_roughness;
+  let cc_alpha2 = max(cc_alpha * cc_alpha, 1e-6);
+
+  var etai = 1.0;
+  var etat = 1.0;
+  if (entering) {
+    etai = peek_medium(stack).ior;
+    etat = mat.ior;
+  } else {
+    etai = peek_medium(stack).ior;
+    etat = peek_outer_medium(stack).ior;
   }
-  if (mat.subsurface > 0.0) { 
-    diff_col = mix(diff_col, mat.subsurface_tint, mat.subsurface); 
+
+  let cc_F_est = fresnel_dielectric(dotSNV, 1.0, mat.clearcoat_ior);
+  let w_cc = select(0.0, mat.clearcoat * cc_F_est, entering);
+  
+  let F_est_raw = fresnel_dielectric(dotSNV, etai, etat);
+  let F0_d = pow((etai - etat) / (etai + etat), 2.0);
+  var F_est = mix(F_est_raw, F0_d, roughness_val);
+  if (F_est_raw >= 0.999) { F_est = 1.0; }
+  
+  let F_metal = ctx.albedo + (vec3f(1.0) - ctx.albedo) * pow(max(0.0, 1.0 - dotSNV), 5.0);
+  let F_actual = mix(vec3f(F_est), F_metal, ctx.metallic);
+  
+  let f_avg = clamp((F_actual.r + F_actual.g + F_actual.b) / 3.0, 0.0, 1.0);
+  let p_cc = w_cc;
+  let p_spec = (1.0 - p_cc) * f_avg;
+  let p_trans = (1.0 - p_cc) * (1.0 - f_avg) * mat.transmission * (1.0 - ctx.metallic);
+  let p_diff = (1.0 - p_cc) * (1.0 - f_avg) * (1.0 - mat.transmission) * (1.0 - ctx.metallic);
+  let total_p = p_cc + p_spec + p_trans + p_diff;
+
+  if (rand_pcg() > ctx.alpha) {
+    (*ray).origin = hit_pos - n_orient * 0.005;
+    return true; 
   }
   
-  let diffuse = diff_col / PI;
+  let rng = rand_pcg();
+  let xi = vec2f(rand_pcg(), rand_pcg());
+  var L = vec3f(0.0);
+  var is_transmission = false;
+
+  if (rng < p_cc) {
+    let H = ImportanceSampleGGX(xi, sn_orient, cc_alpha2);
+    L = reflect(-V, H);
+  } else if (rng < p_cc + p_spec) {
+    var N_spec = n_orient;
+    if (mat.anisotropic > 0.0) {
+      let up = select(vec3f(0,1,0), vec3f(0,0,1), abs(n_orient.y) > 0.99999);
+      var T = normalize(cross(up, n_orient));
+      var B = cross(n_orient, T);
+      let angle = mat.aniso_rotation * TWO_PI;
+      T = T * cos(angle) + B * sin(angle);
+      N_spec = normalize(mix(n_orient, cross(cross(V, T), T), mat.anisotropic));
+    }
+    let H = ImportanceSampleGGX(xi, N_spec, alpha2);
+    L = reflect(-V, H);
+  } else if (rng < p_cc + p_spec + p_trans) {
+    
+    if (abs(etai - etat) < 1e-4) {
+      (*ray).direction = -V;
+      (*ray).origin = hit_pos - n_orient * 0.001; 
+      (*throughput) *= vec3f(mat.transmission * (1.0 - ctx.metallic));
+      (*last_surface_pdf) = p_trans;
+      
+      if (entering) {
+        let sigma = -log(max(ctx.albedo.rgb, vec3f(0.0001))) * mat.concentration;
+        push_medium(stack, Medium(mat.ior, sigma, mat.emittance.rgb));
+      } else { pop_medium(stack); }
+      return true; 
+    }
+    
+    let H = ImportanceSampleGGX(xi, n_orient, alpha2);
+    let eta_ratio = etai / etat;
+    L = refract(-V, H, eta_ratio);
+    
+    if (length(L) < 0.1) { L = reflect(-V, H); } // TIR
+    else { is_transmission = true; }
+  } else if (rng < total_p) {
+    L = ImportanceSampleCosine(xi, n_orient);
+  } else { return false; }
+
+  let dotNL = dot(n_orient, L);
   
-  // Cut off diffuse entirely for Metals and Glass
-  let dielectric = diffuse * (1.0 - ctx.metallic) * (1.0 - mat.transmission);
+  if (is_transmission) {
+    if (dotNL >= 0.0) { return false; } 
+    (*ray).origin = hit_pos - n_orient * 0.001; 
+  } else {
+    if (dotNL <= 0.0) { return false; } 
+    (*ray).origin = hit_pos + n_orient * 0.001; 
+  }
+
+  (*ray).direction = L;
   
-  return dielectric * dotNL;
+  let bsdf_val = eval_surface(V, L, mat, ctx, stack);
+  let pdf_val = pdf_surface(V, L, mat, ctx, stack);
+
+  if (pdf_val > 0.0) { (*throughput) *= bsdf_val / pdf_val; } 
+  else { return false; }
+  
+  (*last_surface_pdf) = pdf_val;
+
+  if (is_transmission) {
+    if (entering) {
+      let albedo_rgb = vec3f(ctx.albedo.r, ctx.albedo.g, ctx.albedo.b);
+      let sigma = -log(max(albedo_rgb, vec3f(0.0001))) * mat.concentration;
+      push_medium(stack, Medium(mat.ior, sigma, mat.emittance.rgb));
+    } else { pop_medium(stack); }
+  }
+
+  return true; 
+}
+
+const FIREFLY_CLAMP: f32 = 5.0; 
+
+fn clamp_firefly(rad: vec3f, bounce: i32) -> vec3f {
+  // NEVER clamp the primary ray (bounce == 0), otherwise 
+  // looking directly at a light source will look gray/dull!
+  if (bounce == 0) { return rad; }
+  
+  let lum = dot(rad, vec3f(0.2126, 0.7152, 0.0722));
+  if (lum > FIREFLY_CLAMP) {
+    return rad * (FIREFLY_CLAMP / lum);
+  }
+  return rad;
+}
+
+fn evaluate_nee(light_sample: LightSample, hit_pos: vec3f, n_orient: vec3f, V: vec3f, mat: Material, ctx: SurfaceContext, tbn: mat3x3f, currentheight: f32, final_uv: vec2f, stack: ptr<function, MediumStack>, ignore_obj_idx: i32) -> vec3f {
+  if (light_sample.pdf <= 0.0) { return vec3f(0.0); }
+  
+  let dotNL = dot(n_orient, light_sample.dir);
+  if (dotNL <= 0.0 && mat.transmission <= 0.0) { return vec3f(0.0); } 
+
+  // Offset using n_orient since it already faces the incoming ray
+  let shadow_ray = Ray(hit_pos + n_orient * 0.001, light_sample.dir);
+  var in_shadow = false;
+  var sample_color = light_sample.color;
+
+  if (HAS_HEIGHTMAPS && mat.height_idx >= 0) {
+    let light_ts = normalize(transpose(tbn) * light_sample.dir);
+    let shadow_res = calculate_shadow_pom(final_uv, currentheight, light_ts, mat, mat.height_idx);
+    if (shadow_res.hit) { in_shadow = true; }
+  }
+  
+  if (!in_shadow) {
+    let shadow_hit = trace_scene_shadow(shadow_ray, ignore_obj_idx, light_sample.dist);
+    sample_color *= shadow_hit;
+    if (max_component(shadow_hit) < 0.001) { in_shadow = true; }
+  }
+
+  if (!in_shadow) {
+    let bsdf_pdf = pdf_surface(V, light_sample.dir, mat, ctx, stack);  
+    let weight = mis_weight(light_sample.pdf, bsdf_pdf);
+    let bsdf_val = eval_surface(V, light_sample.dir, mat, ctx, stack); 
+    
+    return (sample_color * bsdf_val * weight) / max(light_sample.pdf, 1e-6);
+  }
+  
+  return vec3f(0.0);
 }
 
 @compute @workgroup_size(16, 16)
@@ -1324,53 +2090,65 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   // textureStore(output_tex, id.xy, vec4f(ctx.albedo, 1.0));
   // hit.hit_uv = fract(hit.hit_uv); textureStore(output_tex, id.xy, vec4f(hit.hit_uv.x,hit.hit_uv.y,1. - hit.hit_uv.x * hit.hit_uv.y, 1.0));
   // return;
+
+  //var shadow = trace_scene_shadow(ray, -1, 10);
+  //textureStore(output_tex, id.xy, vec4f(shadow, 1.0));
+  //return;
   
   var throughput = vec3f(1.0);
   var radiance = vec3f(0.0);
-  var beers_dist = 0.0;
+  var last_surface_pdf = 1.0; 
   
-  var last_bsdf_pdf = 1.0; 
-  var is_specular_bounce = false; // Tracks if the previous hit was a mirror/glossy bounce
-  _ = arrayLength(&lights);
+  // Initialize the empty stack (Defaults to Air implicitly)
+  var stack: MediumStack;
+  stack.count = 0;
 
   for (var bounce = 0; bounce < BOUNCE_LIMIT; bounce++) {
     var hit = trace_scene(ray);
     var obj: TransformedObject;
     if (hit.o_idx >= 0) { obj = objects[hit.o_idx]; }
     //throughput*=pow(0.9,f32(hit.count));
+
+    // --- 1. GLOBAL VOLUME ATTENUATION (Beer's Law) ---
+    // This perfectly tracks continuous distance through the current medium.
+    let current_med = peek_medium(&stack);
+    if (current_med.ior > 1.0 || length(current_med.sigma) > 0.0) { 
+      let dist = select(hit.t, 1000.0, hit.m_idx == -1); 
+      let attenuation = exp(-current_med.sigma * dist);
+      
+      // FIX: Physically correct volumetric emission integral!
+      // Formula: (emission * (1 - exp(-sigma * d))) / sigma
+      let sigma = current_med.sigma;
+      let emit_x = select(current_med.emission.x * dist, current_med.emission.x * (1.0 - attenuation.x) / sigma.x, sigma.x > 1e-4);
+      let emit_y = select(current_med.emission.y * dist, current_med.emission.y * (1.0 - attenuation.y) / sigma.y, sigma.y > 1e-4);
+      let emit_z = select(current_med.emission.z * dist, current_med.emission.z * (1.0 - attenuation.z) / sigma.z, sigma.z > 1e-4);
+      
+      let incoming = vec3f(emit_x, emit_y, emit_z);
+      radiance += throughput * clamp_firefly(incoming, bounce);
+      throughput *= attenuation;
+    }
     
-    // 1. Hit the Sky?
     if (hit.m_idx == -1) {
       if (HAS_SKYBOX) {
         var sky_color = sample_sky(ray.direction);
         var weight = 1.0;
-        
-        if (bounce > 0) {
-          // FIX: If the ray bounced off a mirror/metal, it was NOT evaluated by NEE.
-          // Therefore we keep weight = 1.0 to preserve bright specular highlights!
-          if (!is_specular_bounce && MIS_SKYBOX) {
-            let sky_pdf = get_sky_pdf(ray.direction);
-            weight = mis_weight(last_bsdf_pdf, sky_pdf);
-          }
-          // cap it
-          sky_color = min(sky_color,vec3f(20.0));
+        if (bounce > 0 && MIS_SKYBOX) {
+          let sky_pdf = get_sky_pdf(ray.direction);
+          weight = mis_weight(last_surface_pdf, sky_pdf);
         }
-        radiance += throughput * sky_color * weight;
+        let incoming = sky_color * weight;
+        radiance += throughput * clamp_firefly(incoming, bounce);
       } else { 
-        radiance += throughput * vec3f(0.02, 0.03, 0.05);
+        radiance += throughput * clamp_firefly(vec3f(0.02, 0.03, 0.05), bounce);
       }
       break;
     }
 
     let mat = materials[hit.m_idx];
     var final_uv = hit.hit_uv * mat.uv_scale;
-    var final_n = hit.hit_n;
     let tbn = mat3x3f(hit.tangent, hit.bitangent, hit.hit_n);
     var currentheight = 0.;
-      
-    beers_dist += hit.t;
 
-    // --- PARALLAX OCCLUSION MAPPING ---
     let height_idx = mat.height_idx;
     if (HAS_HEIGHTMAPS && height_idx >= 0) {
       let view_ts = normalize(transpose(tbn) * (-ray.direction)); 
@@ -1383,96 +2161,49 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
     let ctx = get_surface_context(hit, mat, tbn, final_uv);
 
-    if (length(ctx.emittance) > 0.0) { // Or however you check if it's a light
+    // --- IMPLICIT LIGHT HIT (BSDF Bounce) ---
+    if (length(ctx.emittance) > 0.0) { 
       var weight = 1.0;
-      if (HAS_LIGHTS && !is_specular_bounce && bounce > 0 && hit.o_idx > 0 && obj.light_idx > 0) {
-        // Calculate the probability that we WOULD have explicitly sampled this direction
-        // (Assuming you have 1 light. If you have N lights, multiply light_pdf by 1.0/N)
+      if (HAS_LIGHTS && bounce > 0 && hit.o_idx > 0 && obj.light_idx >= 0) {
         let light = lights[obj.light_idx];
         let light_pdf = get_light_pdf(light, obj, ray.origin, ray.direction) / f32(arrayLength(&lights));
-        weight = mis_weight(last_bsdf_pdf, light_pdf);
+        weight = mis_weight(last_surface_pdf, light_pdf);
       }
-      radiance += throughput * ctx.emittance * weight;
-      if (HAS_LIGHTS && hit.o_idx > 0 && obj.light_idx > 0) { break; }
+      
+      let incoming = ctx.emittance.rgb * weight;
+      radiance += throughput * clamp_firefly(incoming, bounce);
+      
+      if (HAS_LIGHTS && hit.o_idx > 0 && obj.light_idx >= 0) { break; }
       else if (length(ctx.emittance) > 1.0) { break; }
     }
 
     let hit_pos = ray.origin + ray.direction * hit.t;
     let V = -ray.direction;
+    let n_orient = select(-ctx.normal, ctx.normal, dot(ctx.normal, V) > 0.0);
 
-    if (HAS_LIGHTS && ctx.metallic < 1.0 && mat.transmission < 0.1) {
+    if (HAS_LIGHTS) {
       for (var i = 0u; i < arrayLength(&lights); i++) {
         let light = lights[i];
         if (light.obj_idx < 0) { continue; }
-        let obj = objects[light.obj_idx];
-        if (obj.material_idx < 0) { continue; }
-        let mat = materials[obj.material_idx];
+        let l_obj = objects[light.obj_idx];
+        if (l_obj.material_idx < 0) { continue; }
 
-        let light_sample = sample_light(light, obj, hit_pos);
-        if (light_sample.pdf <= 0.0) { continue; }
-        let dotNL = dot(ctx.normal, light_sample.dir);
-        if (dotNL <= 0.0) { continue; }
-        let shadow_ray = Ray(hit_pos + ctx.surface_normal * 0.001, light_sample.dir);
-        var in_shadow = false;
-
-        if (HAS_HEIGHTMAPS && mat.height_idx >= 0) {
-          let light_ts = normalize(transpose(tbn) * (light_sample.dir));
-          let shadow_res = calculate_shadow_pom(final_uv, currentheight, light_ts, mat, mat.height_idx);
-          if (shadow_res.hit) { in_shadow = true; }
-        }
-        
-        if (!in_shadow) {
-          let shadow_hit = trace_scene(shadow_ray);
-          if (shadow_hit.o_idx != light.obj_idx) { in_shadow = true; }
-        }
-
-        if (!in_shadow) {
-          let light_pdf = light_sample.pdf;
-          let bsdf_pdf = pdf_bsdf(V, light_sample.dir, mat, ctx);  
-          let weight = mis_weight(light_pdf, bsdf_pdf);
-          
-          let bsdf_val = eval_bsdf(V, light_sample.dir, mat, ctx); 
-          // does this have dotNL in it?
-          radiance += throughput * (light_sample.color * bsdf_val * weight) / max(light_pdf, 1e-6);
-        }
+        var light_sample = sample_light(light, l_obj, hit_pos);
+        let incoming = evaluate_nee(light_sample, hit_pos, n_orient, V, mat, ctx, tbn, currentheight, final_uv, &stack, light.obj_idx);
+        radiance += throughput * clamp_firefly(incoming, bounce);
       }
     }
 
-    // 3. NEXT EVENT ESTIMATION (Direct Sky Sampling)
-    // Only attempt direct diffuse sampling on materials that actually have a diffuse component
-    if (HAS_SKYBOX && MIS_SKYBOX && ctx.metallic < 1.0 && mat.transmission < 0.1) {
-      let sky_sample = sample_env_cdf(vec2f(rand_pcg(), rand_pcg()));
-      
-      let dotNL = max(dot(ctx.normal, sky_sample.direction), 0.0);
-      if (dotNL > 0.0 && sky_sample.pdf > 0.0) {
-        var shadow_ray = Ray(hit_pos + ctx.surface_normal * 0.001, sky_sample.direction);
-        var in_shadow = false;
-        
-        if (HAS_HEIGHTMAPS && mat.height_idx >= 0) {
-          let light_ts = normalize(transpose(tbn) * (sky_sample.direction));
-          let shadow_res = calculate_shadow_pom(final_uv, currentheight, light_ts, mat, mat.height_idx);
-          if (shadow_res.hit) { in_shadow = true; }
-        }
-        
-        if (!in_shadow) {
-          let shadow_hit = trace_scene(shadow_ray);
-          if (shadow_hit.m_idx != -1) { in_shadow = true; }
-        }
-        
-        if (!in_shadow) {
-          let sky_pdf = sky_sample.pdf;
-          let bsdf_pdf = pdf_bsdf(V, sky_sample.direction, mat, ctx);
-          let weight = mis_weight(sky_pdf, bsdf_pdf);
-
-          let bsdf_val = eval_bsdf(V, sky_sample.direction, mat, ctx);
-          radiance += throughput * (sky_sample.color * bsdf_val * weight) / max(sky_pdf, 1e-6);
-        }
-      }
+    // --- DIRECT SKY SAMPLING (NEE) ---
+    if (HAS_SKYBOX && MIS_SKYBOX) {
+      var env_sample = sample_env_cdf(vec2f(rand_pcg(), rand_pcg()));
+      let incoming = evaluate_nee(env_sample, hit_pos, n_orient, V, mat, ctx, tbn, currentheight, final_uv, &stack, -1);
+      radiance += throughput * clamp_firefly(incoming, bounce);
     }
     
-    if (!sample_bsdf(&ray, &throughput, &radiance, hit, mat, ctx, hit_pos, &beers_dist, &is_specular_bounce)) { break; }
-    last_bsdf_pdf = pdf_bsdf(V, ray.direction, mat, ctx);
-    
+    // NOTE: &beers_dist has been removed from these calls!
+    if (!sample_surface(&ray, &throughput, &radiance, hit, mat, ctx, hit_pos, &stack, &last_surface_pdf)) { break; }
+
     // --- HEIGHTMAP / POM SHADOW LOGIC ---
     if (HAS_HEIGHTMAPS && mat.height_idx >= 0) {
       let light_ts = normalize(transpose(tbn) * (ray.direction));
@@ -1481,17 +2212,17 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         final_uv = shadow_res.uv;
         let ctx_pom = get_surface_context(hit, mat, tbn, final_uv);
         
-        radiance += throughput * ctx_pom.emittance;
-        if (length(ctx_pom.emittance) > 1.0) { break; }
+        let incoming = ctx_pom.emittance.rgb;
+        radiance += throughput * clamp_firefly(incoming, bounce);
         
-        if (!sample_bsdf(&ray, &throughput, &radiance, hit, mat, ctx_pom, hit_pos, &beers_dist, &is_specular_bounce)) { break; }
-        last_bsdf_pdf = pdf_bsdf(V, ray.direction, mat, ctx_pom);
+        if (length(ctx_pom.emittance) > 1.0) { break; }
+        if (!sample_surface(&ray, &throughput, &radiance, hit, mat, ctx_pom, hit_pos, &stack, &last_surface_pdf)) { break; }
       }
     }
 
     // Russian Roulette
     if (bounce < 2) { continue; } 
-    let p = max(throughput.r, max(throughput.g, throughput.b));
+    let p = max_component(throughput);
     let survival_prob = clamp(p, 0.05, 0.95);
     if (rand_pcg() > survival_prob) { break; }
     throughput /= survival_prob;
@@ -1503,7 +2234,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   accum_buffer[idx] = vec4f(final_c, 1.0);
   
   final_c *= vec3f(params.exposure);
-  //final_c = final_c / (final_c + vec3(1.0));
+  final_c = final_c / (final_c + vec3(0.3));
   final_c = pow(final_c, vec3f(0.4545));
   
   textureStore(output_tex, id.xy, vec4f(final_c, 1.0));
