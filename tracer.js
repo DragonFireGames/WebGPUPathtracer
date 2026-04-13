@@ -1628,30 +1628,32 @@ class Scene {
     }
     return texs;
   }
-  getLights(objects) {
+  lightPower(obj) {
     const MIN_LIGHT_POWER = 0.01; // Tweak this based on scene scale
 
+    const mat = obj.material;
+    if (obj.type != "Sphere") return { power: 0 };
+    if (mat.emissiveTex) return { power: 0 };
+
+    // 1. Calculate Perceived Brightness (Luminance)
+    const luminance = (0.2126 * mat.emittance[0] + 0.7152 * mat.emittance[1] + 0.0722 * mat.emittance[2]) * mat.emissionIntensity;
+
+    if (luminance <= 0) return { power: 0 };
+    const area = obj.getArea(); 
+    const power = luminance * area;
+    
+    if (power < MIN_LIGHT_POWER) return { power: 0 };
+    return { power, area };
+  }
+  getLights(objects) {
     let explicitLights = [];
     for (let i = 0; i < objects.length; i++) {
       const obj = objects[i];
-      const mat = obj.material;
-
-      if (obj.type != "Sphere") continue;
-      if (mat.emissiveTex) continue;
-      if (!mat.enableNEE) continue;
-      
-      // 1. Calculate Perceived Brightness (Luminance)
-      const luminance = 0.2126 * mat.emittance[0] + 0.7152 * mat.emittance[1] + 0.0722 * mat.emittance[2];
-
-      if (luminance > 0) {
-        const area = obj.getArea(); // You'll need to implement this for each primitive
-        const power = luminance * area;
-
-        if (power > MIN_LIGHT_POWER) {
-          obj.lightIdx = explicitLights.length;
-          explicitLights.push(new Light(obj, i, area, power));
-        }
-      }  
+      if (!obj.enableNEE) continue;
+      const { power, area } = this.lightPower(obj);
+      if (power <= 0) continue;
+      obj.lightIdx = explicitLights.length;
+      explicitLights.push(new Light(obj, i, area, power));
     }
     return explicitLights;
   }
@@ -1884,7 +1886,7 @@ class Renderer {
 
   async prepareTextureArray(scene) {
     const textures = scene.getTextures();
-    const size = 2048; // Choose your highest common resolution
+    const size = 512; // Choose your highest common resolution
 
     // 1. Create the 'Stack'
     const texArray = this.device.createTexture({
