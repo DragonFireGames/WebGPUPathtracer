@@ -477,6 +477,10 @@ class Cube extends Primitive {
     vec3.set(this.scale, (maxX - minX) / 2, (maxY - minY) / 2, (maxZ - minZ) / 2);
     this.updateMatrix();
   }
+  getArea() {
+    var s = this.scale;
+    return 8*(s[0]*s[1]+s[1]*s[2]+s[0]*s[2]);
+  }
   generateMesh() {
     // Standard cube with 24 vertices to allow distinct normals/UVs per face
     const p = [
@@ -1632,7 +1636,7 @@ class Scene {
     const MIN_LIGHT_POWER = 0.01; // Tweak this based on scene scale
 
     const mat = obj.material;
-    if (obj.type != "Sphere") return { power: 0 };
+    if (obj.type != "Sphere" && obj.type != "Cube") return { power: 0 };
     if (mat.emissiveTex) return { power: 0 };
 
     // 1. Calculate Perceived Brightness (Luminance)
@@ -1665,18 +1669,25 @@ class Light {
     this.objIdx = index;
     this.area = area;
     this.power = power;
-    var avgScale = object.scale.reduce((a,v)=>a+v,0)/3;
-    object.scaleSet(avgScale,avgScale,avgScale);
-    this.scale = avgScale;
+    //
+    this.scale = 1;
+    if (object.type == "Sphere") {
+      var avgScale = object.scale.reduce((a,v)=>a+v,0)/3;
+      object.scaleSet(avgScale,avgScale,avgScale);
+      this.scale = avgScale;
+    } else if (object.type == "Cube") {
+      this.scale = Math.hypot(...object.scale);
+    }
   }
 }
 Light.getSchema = function(light) {
-  if (!light) light = { objIdx: -1 };
+  if (!light) light = { objIdx: -1, obj: {} };
   return [
     { type: "i32", data: light.objIdx },
     { type: "f32", data: light.area },
     { type: "f32", data: light.power },
     { type: "f32", data: light.scale },
+    { type: "mat4x4f", data: light.obj.matrix },
   ];
 };
 
@@ -1803,6 +1814,11 @@ class Renderer {
     const planes = scene.objects.filter(o => o.type === "Plane");
     const sceneObjects = primitives.concat(inBvhModels);
 
+    const explicitLights = scene.getLights(sceneObjects); // This calls your new method
+    const hasLights = explicitLights.length > 0;
+    const lightPack = this.packDataFromSchema(explicitLights, Light.getSchema);
+    this.totalLightPower = explicitLights.reduce((a,v)=>a+v.power,0);
+
     // 4. Static Model Data (BLAS + Triangles)
     var bvhData = new Float32Array(8), triData = new Float32Array(32);
     if (includeStatic) {
@@ -1851,11 +1867,6 @@ class Renderer {
     const tlasData = this.sceneBvh.flatten();
     const planePack = this.packDataFromSchema(planes, Plane.getSchema);
     const meshPack = this.packDataFromSchema(listModels, Model.getSchema);
-
-    const explicitLights = scene.getLights(sceneObjects); // This calls your new method
-    const hasLights = explicitLights.length > 0;
-    const lightPack = this.packDataFromSchema(explicitLights, Light.getSchema);
-    this.totalLightPower = explicitLights.reduce((a,v)=>a+v.power,0);
 
     const result = {
       mat: matPack,
@@ -2192,7 +2203,7 @@ class Renderer {
     device.queue.writeBuffer(uBuf, 0, uData);
   }
   
-  render() {
+  async render() {
     if (!this.scene) return;
     const { canvas, context, device, bG, pipe, tex } = this;
     this.updateUniforms();
@@ -2211,6 +2222,8 @@ class Renderer {
       enc.copyTextureToTexture({ texture: tex }, { texture: context.getCurrentTexture() }, [canvas.width, canvas.height]);
 
     device.queue.submit([enc.finish()]);
+
+    await device.queue.onSubmittedWorkDone();
     
     this.frame++;
   }

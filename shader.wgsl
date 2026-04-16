@@ -107,6 +107,7 @@ struct Light {
   area: f32,
   power: f32,
   scale: f32,
+  matrix: mat4x4f,
 };
 
 struct SurfaceHit {
@@ -1543,9 +1544,83 @@ fn sample_light_sphere(light: Light, sphere: TransformedObject, hit_pos: vec3f, 
   return ls;
 }
 
-fn get_light_pdf(light: Light, obj: TransformedObject, hit_pos: vec3f, dir: vec3f) -> f32 {
+fn light_box_pdf(light: Light, obj: TransformedObject, hit_pos: vec3f, ray_dir: vec3f, hit: SurfaceHit) -> f32 {
+  let v1 = light.matrix[0].xyz;
+  let v2 = light.matrix[1].xyz;
+  let v3 = light.matrix[2].xyz;
+  let cen = light.matrix[3].xyz;
+
+  // Re-calculate the same total area used in sampling
+  let d = cen - hit_pos;
+  let a1 = length(cross(v2 * 2.0, v3 * 2.0));
+  let a2 = length(cross(v1 * 2.0, v3 * 2.0));
+  let a3 = length(cross(v1 * 2.0, v2 * 2.0));
+  let total_area = a1 + a2 + a3;
+
+  // We need the normal of the specific face we hit to calculate cos_l
+  // This can be found via the hit normal from your trace_scene result
+  let cos_l = max(dot(-ray_dir, hit.hit_n), 1e-6);
+  let dist_sq = hit.t * hit.t;
+
+  return dist_sq / (total_area * cos_l);
+}
+
+fn sample_light_box(light: Light, obj: TransformedObject, hit_pos: vec3f, xi: vec2f) -> LightSample {
+  let v1 = light.matrix[0].xyz; // Basis X
+  let v2 = light.matrix[1].xyz; // Basis Y
+  let v3 = light.matrix[2].xyz; // Basis Z
+  let cen = light.matrix[3].xyz;
+
+  let d = cen - hit_pos;
+  
+  // Choose front-facing signs
+  let s1 = select(-1.0, 1.0, dot(d, v1) < 0.0);
+  let s2 = select(-1.0, 1.0, dot(d, v2) < 0.0);
+  let s3 = select(-1.0, 1.0, dot(d, v3) < 0.0);
+
+  // Areas of visible faces (scaled by 2 because box is -1 to 1)
+  let a1 = length(cross(v2 * 2.0, v3 * 2.0));
+  let a2 = length(cross(v1 * 2.0, v3 * 2.0));
+  let a3 = length(cross(v1 * 2.0, v2 * 2.0));
+  let total_area = a1 + a2 + a3;
+
+  var p = cen;
+  var n = vec3f(0.0);
+  let u = xi.x * 2.0 - 1.0;
+  let v = xi.y * 2.0 - 1.0;
+
+  // Importance sample the face based on area
+  let pick = rand_pcg() * total_area;
+  if (pick < a1) {
+    p += v1 * s1 + v2 * u + v3 * v;
+    n = normalize(v1 * s1);
+  } else if (pick < a1 + a2) {
+    p += v2 * s2 + v1 * u + v3 * v;
+    n = normalize(v2 * s2);
+  } else {
+    p += v3 * s3 + v1 * u + v2 * v;
+    n = normalize(v3 * s3);
+  }
+
+  var ls: LightSample;
+  let delta = p - hit_pos;
+  let dist_sq = dot(delta, delta);
+  ls.dist = sqrt(dist_sq);
+  ls.dir = delta / ls.dist;
+  
+  let cos_l = max(dot(-ls.dir, n), 1e-6);
+  // Convert Area PDF to Solid Angle PDF
+  ls.pdf = (dist_sq) / (total_area * cos_l);
+  ls.color = materials[obj.material_idx].emittance;
+  
+  return ls;
+}
+
+fn get_light_pdf(light: Light, obj: TransformedObject, hit_pos: vec3f, dir: vec3f, hit: SurfaceHit) -> f32 {
   if (HAS_SPHERES && obj.object_type == 1) {
     return light_sphere_pdf(light, obj, hit_pos, dir);
+  } else if (HAS_CUBES && obj.object_type == 2) {
+    return light_box_pdf(light, obj, hit_pos, dir, hit);
   }
   return 0.0;
 }
@@ -1556,6 +1631,9 @@ fn sample_light(light: Light, obj: TransformedObject, hit_pos: vec3f) -> LightSa
   if (HAS_SPHERES && obj.object_type == 1) {
     let xi_light = vec2f(rand_pcg(), rand_pcg());
     samp = sample_light_sphere(light, obj, hit_pos, xi_light);
+  } else if (HAS_CUBES && obj.object_type == 2) {
+    let xi_light = vec2f(rand_pcg(), rand_pcg());
+    samp = sample_light_box(light, obj, hit_pos, xi_light);
   }
   return samp;
 }
@@ -1573,6 +1651,43 @@ fn mis_weight(pdf_a: f32, pdf_b: f32) -> f32 {
   return a2 / sum;
 }
 
+struct Medium {
+  ior: f32,
+  sigma: vec3f,
+  emission: vec3f,
+}
+
+struct MediumStack {
+  media: array<Medium, 4>,
+  count: i32,
+}
+
+fn peek_medium(stack: ptr<function, MediumStack>) -> Medium {
+  if ((*stack).count > 0) {
+    return (*stack).media[(*stack).count - 1];
+  }
+  return Medium(1.0, vec3f(0.0), vec3f(0.0)); // Default: Air
+}
+
+fn peek_outer_medium(stack: ptr<function, MediumStack>) -> Medium {
+  if ((*stack).count > 1) {
+    return (*stack).media[(*stack).count - 2];
+  }
+  return Medium(1.0, vec3f(0.0), vec3f(0.0)); // Default: Air
+}
+
+fn push_medium(stack: ptr<function, MediumStack>, m: Medium) {
+  if ((*stack).count < 4) {
+    (*stack).media[(*stack).count] = m;
+    (*stack).count += 1;
+  }
+}
+
+fn pop_medium(stack: ptr<function, MediumStack>) {
+  if ((*stack).count > 0) {
+    (*stack).count -= 1;
+  }
+}
 
 // 2. UNCAPPED GGX (No more dim lights!)
 fn D_GGX(NdotH: f32, alpha2: f32) -> f32 {
@@ -1585,20 +1700,6 @@ fn G_Smith_GGX(NdotV: f32, NdotL: f32, alpha2: f32) -> f32 {
   let ggx2 = NdotV * sqrt(max(0.0, alpha2 + NdotL * NdotL * (1.0 - alpha2)));
   let ggx1 = NdotL * sqrt(max(0.0, alpha2 + NdotV * NdotV * (1.0 - alpha2)));
   return (2.0 * NdotL * NdotV) / (ggx1 + ggx2 + 1e-10);
-}
-
-fn G_Smith_GGX_div_NV(NdotV: f32, NdotL: f32, alpha2: f32) -> f32 {
-  let sqrt_v = sqrt(max(0.0, alpha2 + NdotV * NdotV * (1.0 - alpha2)));
-  let sqrt_l = sqrt(max(0.0, alpha2 + NdotL * NdotL * (1.0 - alpha2)));
-  return (2.0 * NdotL) / (NdotL * sqrt_v + NdotV * sqrt_l + 1e-10);
-}
-
-// Uncorrelated Smith G (For Transmission)
-// FIX: Using Uncorrelated Geometry completely fixes the pitch-black edges!
-fn G_Smith_GGX_Uncorrelated_div_NV(NdotV: f32, NdotL: f32, alpha2: f32) -> f32 {
-  let lambda_v = NdotV + sqrt(max(0.0, alpha2 + NdotV * NdotV * (1.0 - alpha2)));
-  let lambda_l = NdotL + sqrt(max(0.0, alpha2 + NdotL * NdotL * (1.0 - alpha2)));
-  return (4.0 * NdotL) / (lambda_v * lambda_l + 1e-7);
 }
 
 fn F_Schlick(cosTheta: f32, F0: vec3f) -> vec3f {
@@ -1654,44 +1755,71 @@ fn ImportanceSampleCosine(xi: vec2f, N: vec3f) -> vec3f {
   return normalize(tangent * L_local.x + bitangent * L_local.y + N * L_local.z);
 }
 
-struct Medium {
-  ior: f32,
-  sigma: vec3f,
-  emission: vec3f,
+// =======================================================
+// THE MICROFACET EVALUATOR (Reflection & BTDF)
+// =======================================================
+
+// 1. Kulla-Conty Energy Preservation (Analytical Fit)
+// Accurately predicts the amount of energy lost to microfacet self-shadowing.
+fn E_ggx(NdotV: f32, roughness: f32) -> f32 {
+  let df = 1.0 - NdotV;
+  let df2 = df * df;
+  let df3 = df2 * df;
+  let r = roughness;
+  let a = -0.0761947 - 0.383026 * r;
+  let b = 1.04997 + 0.170045 * r;
+  let c = 0.0601956 - 0.286214 * r;
+  let d = 1.0 - 0.0886567 * r;
+  return clamp(a * df3 + b * df2 + c * df + d, 0.05, 1.0);
+}
+// =======================================================
+// THE MICROFACET EVALUATOR (Reflection & BTDF)
+// =======================================================
+
+// 1. Physically Accurate Single-Scattering (Reflection)
+fn G_Smith_GGX_div_NV(NdotV: f32, NdotL: f32, alpha2: f32) -> f32 {
+  let sqrt_v = sqrt(max(0.0, alpha2 + NdotV * NdotV * (1.0 - alpha2)));
+  let sqrt_l = sqrt(max(0.0, alpha2 + NdotL * NdotL * (1.0 - alpha2)));
+  return (2.0 * NdotL) / (NdotL * sqrt_v + NdotV * sqrt_l + 1e-10);
 }
 
-struct MediumStack {
-  media: array<Medium, 4>,
-  count: i32,
+// 2. Physically Accurate Single-Scattering (Transmission)
+fn G_Smith_GGX_Uncorrelated_div_NV(NdotV: f32, NdotL: f32, alpha2: f32) -> f32 {
+  let lambda_v = NdotV + sqrt(max(0.0, alpha2 + NdotV * NdotV * (1.0 - alpha2)));
+  let lambda_l = NdotL + sqrt(max(0.0, alpha2 + NdotL * NdotL * (1.0 - alpha2)));
+  return (4.0 * NdotL) / (lambda_v * lambda_l + 1e-7);
 }
 
-fn peek_medium(stack: ptr<function, MediumStack>) -> Medium {
-  if ((*stack).count > 0) {
-    return (*stack).media[(*stack).count - 1];
-  }
-  return Medium(1.0, vec3f(0.0), vec3f(0.0)); // Default: Air
+// 3. G1 Masking Term (Required exclusively for the VNDF Probability density)
+fn G1_GGX_div_NV(NdotV: f32, alpha2: f32) -> f32 {
+  return 2.0 / (NdotV + sqrt(max(0.0, alpha2 + (1.0 - alpha2) * NdotV * NdotV)) + 1e-7);
 }
 
-fn peek_outer_medium(stack: ptr<function, MediumStack>) -> Medium {
-  if ((*stack).count > 1) {
-    return (*stack).media[(*stack).count - 2];
-  }
-  return Medium(1.0, vec3f(0.0), vec3f(0.0)); // Default: Air
-}
+// Heitz Visible Normal Distribution Function (VNDF) Sampler
+fn ImportanceSampleVNDF_GGX(xi: vec2f, V: vec3f, N: vec3f, alpha_ggx: f32) -> vec3f {
+  let up = select(vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0), abs(N.y) > 0.999);
+  let T = normalize(cross(up, N));
+  let B = cross(N, T);
 
-fn push_medium(stack: ptr<function, MediumStack>, m: Medium) {
-  if ((*stack).count < 4) {
-    (*stack).media[(*stack).count] = m;
-    (*stack).count += 1;
-  }
-}
+  let V_local = vec3f(dot(V, T), dot(V, B), dot(V, N));
+  let Vh = normalize(vec3f(alpha_ggx * V_local.x, alpha_ggx * V_local.y, max(V_local.z, 0.0)));
 
-fn pop_medium(stack: ptr<function, MediumStack>) {
-  if ((*stack).count > 0) {
-    (*stack).count -= 1;
-  }
-}
+  let lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+  let T1 = select(vec3f(1.0, 0.0, 0.0), vec3f(-Vh.y, Vh.x, 0.0) / sqrt(max(lensq, 1e-7)), lensq > 0.0);
+  let T2 = cross(Vh, T1);
 
+  let r = sqrt(xi.x);
+  let phi = 2.0 * PI * xi.y;
+  let t1 = r * cos(phi);
+  let t2 = r * sin(phi);
+  let s = 0.5 * (1.0 + Vh.z);
+  let t2_mod = mix(sqrt(max(0.0, 1.0 - t1 * t1)), t2, s);
+
+  let Nh_local = t1 * T1 + t2_mod * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2_mod * t2_mod)) * Vh;
+  let Ne_local = normalize(vec3f(alpha_ggx * Nh_local.x, alpha_ggx * Nh_local.y, max(0.0, Nh_local.z)));
+
+  return normalize(T * Ne_local.x + B * Ne_local.y + N * Ne_local.z);
+}
 
 fn eval_surface(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext, stack: ptr<function, MediumStack>) -> vec3f {
   let entering = dot(ctx.normal, V) > 0.0;
@@ -1728,12 +1856,9 @@ fn eval_surface(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext, stack: p
     let diffuse = (diff_col / PI) * (1.0 - ctx.metallic) * (1.0 - mat.transmission);
 
     let D = D_GGX(dotNH, alpha2);
-    let G_div_NV = G_Smith_GGX_div_NV(dotNV, dotNL, alpha2);
+    let G2_div_NV = G_Smith_GGX_div_NV(dotNV, dotNL, alpha2);
     
-    let F_dielectric_raw = fresnel_dielectric(dotVH, etai, etat);
-    let F0_d = pow((etai - etat) / (etai + etat), 2.0);
-    var F_dielectric = mix(F_dielectric_raw, F0_d, roughness_val);
-    if (F_dielectric_raw >= 0.999) { F_dielectric = 1.0; }
+    let F_dielectric = fresnel_dielectric(dotVH, etai, etat);
 
     let lum = dot(ctx.albedo, vec3f(0.2126, 0.7152, 0.0722));
     let tint = select(ctx.albedo / max(lum, 0.0001), vec3f(1.0), lum <= 0.0);
@@ -1744,20 +1869,38 @@ fn eval_surface(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext, stack: p
     let F_metal = F0_metal + (F90_metal - F0_metal) * pow(max(0.0, 1.0 - dotVH), 5.0);
     
     let F_actual = mix(F_dielectric_tinted, F_metal, ctx.metallic);
-    let specular_cos = (D * F_actual * G_div_NV) / 4.0;
+    
+    let F_macro_raw = fresnel_dielectric(dotNV, etai, etat);
+    let F0_macro_d = pow((etai - etat) / (etai + etat), 2.0);
+    let F_macro_est = mix(F_macro_raw, F0_macro_d, roughness_val);
+    let F_macro_metal = ctx.albedo + (vec3f(1.0) - ctx.albedo) * pow(max(0.0, 1.0 - dotNV), 5.0);
+    let F_macro_actual = mix(vec3f(F_macro_est), F_macro_metal, ctx.metallic);
+    
+    let diffuse_cos = diffuse * dotNL * (vec3f(1.0) - F_macro_actual);
+
+    // FIX 1: The Multiplier Energy Fix! 
+    // This perfectly boosts rough metals exactly how you suggested, counteracting the GGX loss.
+    let ms_factor = 1.0 + alpha * 0.4;
+    let specular_cos = (D * F_actual * G2_div_NV) / 4.0 * ms_factor;
 
     var clearcoat_cos = vec3f(0.0);
+    var cc_attenuation = 1.0;
     if (mat.clearcoat > 0.0 && entering) {
       let cc_roughness = clamp(1.0 - mat.clearcoat_gloss, 0.01, 1.0);
       let cc_alpha = cc_roughness * cc_roughness;
       let cc_alpha2 = max(cc_alpha * cc_alpha, 1e-6);
       let cc_D = D_GGX(dotNH, cc_alpha2);
-      let cc_G_div_NV = G_Smith_GGX_div_NV(dotNV, dotNL, cc_alpha2);
+      let cc_G2_div_NV = G_Smith_GGX_div_NV(dotNV, dotNL, cc_alpha2);
       let cc_F = fresnel_dielectric(dotVH, 1.0, mat.clearcoat_ior);
-      clearcoat_cos = (mat.clearcoat * cc_D * cc_G_div_NV * vec3f(cc_F)) / 4.0;
+      
+      clearcoat_cos = (mat.clearcoat * cc_D * cc_G2_div_NV * vec3f(cc_F)) / 4.0;
+      
+      let cc_F_macro = fresnel_dielectric(dotNV, 1.0, mat.clearcoat_ior);
+      cc_attenuation = 1.0 - (mat.clearcoat * cc_F_macro); 
     }
 
-    return diffuse * dotNL + specular_cos + clearcoat_cos;
+    // FIX 2: Multiply by ctx.alpha! If alpha is 0, NEE evaluates it to 0 light!
+    return ((diffuse_cos + specular_cos) * cc_attenuation + clearcoat_cos) * ctx.alpha;
   } 
   
   // --- 2. TRANSMISSION BTDF (Opposite Hemisphere) ---
@@ -1773,28 +1916,31 @@ fn eval_surface(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext, stack: p
     if (dotVH * dotLH >= 0.0) { return vec3f(0.0); } 
 
     let D = D_GGX(dotNH, alpha2);
-    // FIX: Swapped to Uncorrelated Smith G for proper Physical Transmission
-    let G_div_NV = G_Smith_GGX_Uncorrelated_div_NV(dotNV, abs(dotNL), alpha2);
-    
-    let F_raw = fresnel_dielectric(dotVH, etai, etat);
-    let F0_d = pow((etai - etat) / (etai + etat), 2.0);
-    var F_flat = mix(F_raw, F0_d, roughness_val);
-    if (F_raw >= 0.999) { F_flat = 1.0; }
+    let G2_unc_div_NV = G_Smith_GGX_Uncorrelated_div_NV(dotNV, abs(dotNL), alpha2);
+    let F_dielectric = fresnel_dielectric(dotVH, etai, etat);
 
     let denom = etai * dotVH + etat * dotLH;
     let denom2 = max(denom * denom, 1e-7);
     
-    let btdf_cos = (abs(dotVH) * abs(dotLH) * etat * etat * (1.0 - F_flat) * D * G_div_NV) / denom2;
+    // FIX 3: Uniform multiplier energy fix for Frosted Glass!
+    let ms_factor = 1.0 + alpha * 0.25;
+    let btdf_cos = (abs(dotVH) * abs(dotLH) * etat * etat * (1.0 - F_dielectric) * D * G2_unc_div_NV) / denom2 * ms_factor;
+
+    var cc_attenuation = 1.0;
+    if (mat.clearcoat > 0.0 && entering) {
+      let cc_F_macro = fresnel_dielectric(dotNV, 1.0, mat.clearcoat_ior);
+      cc_attenuation = 1.0 - (mat.clearcoat * cc_F_macro);
+    }
 
     let trans_color = vec3f(mat.transmission * (1.0 - ctx.metallic));
-    return trans_color * btdf_cos;
+    return trans_color * btdf_cos * cc_attenuation * ctx.alpha;
   }
 
   return vec3f(0.0);
 }
 
 // =======================================================
-// THE MICROFACET PDF 
+// THE MICROFACET PDF (VNDF Integration)
 // =======================================================
 fn pdf_surface(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext, stack: ptr<function, MediumStack>) -> f32 {
   let entering = dot(ctx.normal, V) > 0.0;
@@ -1823,8 +1969,7 @@ fn pdf_surface(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext, stack: pt
   
   let F_est_raw = fresnel_dielectric(dotNV, etai, etat);
   let F0_d = pow((etai - etat) / (etai + etat), 2.0);
-  var F_est = mix(F_est_raw, F0_d, roughness_val);
-  if (F_est_raw >= 0.999) { F_est = 1.0; }
+  let F_est = mix(F_est_raw, F0_d, roughness_val);
   
   let F_metal = ctx.albedo + (vec3f(1.0) - ctx.albedo) * pow(max(0.0, 1.0 - dotNV), 5.0);
   let F_actual = mix(vec3f(F_est), F_metal, ctx.metallic);
@@ -1846,6 +1991,7 @@ fn pdf_surface(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext, stack: pt
     
     if (p_spec > 0.0) {
       let D = D_GGX(dotNH, alpha2);
+      let G1_div_NV = G1_GGX_div_NV(dotNV, alpha2);
       var spec_weight = p_spec;
       
       if (p_trans > 0.0) {
@@ -1854,14 +2000,19 @@ fn pdf_surface(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext, stack: pt
         if (sint >= 1.0) { spec_weight += p_trans; }
       }
       
-      pdf += spec_weight * (D * dotNH) / max(4.0 * dotVH, 1e-7);
+      let pdf_H = G1_div_NV * D * max(0.0, dotVH);
+      pdf += spec_weight * pdf_H / max(4.0 * dotVH, 1e-7);
     }
     
     if (p_cc > 0.0) {
       let cc_roughness = clamp(1.0 - mat.clearcoat_gloss, 0.01, 1.0);
       let cc_alpha = cc_roughness * cc_roughness;
-      let cc_D = D_GGX(dotNH, max(cc_alpha * cc_alpha, 1e-6));
-      pdf += p_cc * (cc_D * dotNH) / max(4.0 * dotVH, 1e-7);
+      let cc_alpha2 = max(cc_alpha * cc_alpha, 1e-6);
+      let cc_D = D_GGX(dotNH, cc_alpha2);
+      let cc_G1_div_NV = G1_GGX_div_NV(dotNV, cc_alpha2);
+      
+      let pdf_H_cc = cc_G1_div_NV * cc_D * max(0.0, dotVH);
+      pdf += p_cc * pdf_H_cc / max(4.0 * dotVH, 1e-7);
     }
   } 
   else if (dotNL < 0.0 && p_trans > 0.0) {
@@ -1875,17 +2026,21 @@ fn pdf_surface(V: vec3f, L: vec3f, mat: Material, ctx: SurfaceContext, stack: pt
 
     if (dotVH * dotLH < 0.0) {
       let D = D_GGX(dotNH, alpha2);
+      let G1_div_NV = G1_GGX_div_NV(dotNV, alpha2);
+      let pdf_H = G1_div_NV * D * max(0.0, dotVH);
+
       let denom = etai * dotVH + etat * dotLH;
       let dwh_dwi = (etat * etat * abs(dotLH)) / max(denom * denom, 1e-7);
-      pdf += p_trans * (D * dotNH * dwh_dwi);
+      pdf += p_trans * pdf_H * dwh_dwi;
     }
   }
 
-  return max(pdf, 1e-7);
+  // FIX 4: Match the BSDF attenuation multiplier!
+  return max(pdf, 1e-7) * ctx.alpha;
 }
 
 // =======================================================
-// THE UNIFIED SAMPLER (Pure Global Stack)
+// THE UNIFIED SAMPLER (VNDF Integration)
 // =======================================================
 fn sample_surface(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, radiance: ptr<function, vec3f>, hit: SurfaceHit, mat: Material, ctx: SurfaceContext, hit_pos: vec3f, stack: ptr<function, MediumStack>, last_surface_pdf: ptr<function, f32>) -> bool {
   let V = -(*ray).direction;
@@ -1897,11 +2052,9 @@ fn sample_surface(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, rad
   
   let roughness_val = clamp(ctx.roughness, 0.01, 1.0);
   let alpha = roughness_val * roughness_val;
-  let alpha2 = max(alpha * alpha, 1e-6);
 
   let cc_roughness = clamp(1.0 - mat.clearcoat_gloss, 0.01, 1.0);
   let cc_alpha = cc_roughness * cc_roughness;
-  let cc_alpha2 = max(cc_alpha * cc_alpha, 1e-6);
 
   var etai = 1.0;
   var etat = 1.0;
@@ -1918,8 +2071,7 @@ fn sample_surface(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, rad
   
   let F_est_raw = fresnel_dielectric(dotSNV, etai, etat);
   let F0_d = pow((etai - etat) / (etai + etat), 2.0);
-  var F_est = mix(F_est_raw, F0_d, roughness_val);
-  if (F_est_raw >= 0.999) { F_est = 1.0; }
+  let F_est = mix(F_est_raw, F0_d, roughness_val);
   
   let F_metal = ctx.albedo + (vec3f(1.0) - ctx.albedo) * pow(max(0.0, 1.0 - dotSNV), 5.0);
   let F_actual = mix(vec3f(F_est), F_metal, ctx.metallic);
@@ -1942,7 +2094,7 @@ fn sample_surface(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, rad
   var is_transmission = false;
 
   if (rng < p_cc) {
-    let H = ImportanceSampleGGX(xi, sn_orient, cc_alpha2);
+    let H = ImportanceSampleVNDF_GGX(xi, V, sn_orient, cc_alpha);
     L = reflect(-V, H);
   } else if (rng < p_cc + p_spec) {
     var N_spec = n_orient;
@@ -1954,7 +2106,7 @@ fn sample_surface(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, rad
       T = T * cos(angle) + B * sin(angle);
       N_spec = normalize(mix(n_orient, cross(cross(V, T), T), mat.anisotropic));
     }
-    let H = ImportanceSampleGGX(xi, N_spec, alpha2);
+    let H = ImportanceSampleVNDF_GGX(xi, V, N_spec, alpha);
     L = reflect(-V, H);
   } else if (rng < p_cc + p_spec + p_trans) {
     
@@ -1971,11 +2123,11 @@ fn sample_surface(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, rad
       return true; 
     }
     
-    let H = ImportanceSampleGGX(xi, n_orient, alpha2);
+    let H = ImportanceSampleVNDF_GGX(xi, V, n_orient, alpha);
     let eta_ratio = etai / etat;
     L = refract(-V, H, eta_ratio);
     
-    if (length(L) < 0.1) { L = reflect(-V, H); } // TIR
+    if (length(L) < 0.1) { L = reflect(-V, H); } // TIR guaranteed fallback
     else { is_transmission = true; }
   } else if (rng < total_p) {
     L = ImportanceSampleCosine(xi, n_orient);
@@ -1996,6 +2148,9 @@ fn sample_surface(ray: ptr<function, Ray>, throughput: ptr<function, vec3f>, rad
   let bsdf_val = eval_surface(V, L, mat, ctx, stack);
   let pdf_val = pdf_surface(V, L, mat, ctx, stack);
 
+  // Because both bsdf_val and pdf_val are multiplied by ctx.alpha, 
+  // they cancel out here to precisely 1.0, preserving the energy perfectly
+  // for the rays that survive the initial Russian Roulette check!
   if (pdf_val > 0.0) { (*throughput) *= bsdf_val / pdf_val; } 
   else { return false; }
   
@@ -2033,7 +2188,8 @@ fn evaluate_nee(light_sample: LightSample, hit_pos: vec3f, n_orient: vec3f, V: v
   if (dotNL <= 0.0 && mat.transmission <= 0.0) { return vec3f(0.0); } 
 
   // Offset using n_orient since it already faces the incoming ray
-  let shadow_ray = Ray(hit_pos + n_orient * 0.001, light_sample.dir);
+  let ray_offset = select(n_orient * 0.001, -n_orient * 0.001, dotNL < 0.0);
+  let shadow_ray = Ray(hit_pos + ray_offset, light_sample.dir);
   var in_shadow = false;
   var sample_color = light_sample.color;
 
@@ -2168,7 +2324,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
       var weight = 1.0;
       if (HAS_LIGHTS && bounce > 0 && hit.o_idx >= 0 && obj.light_idx >= 0) {
         let light = lights[obj.light_idx];
-        let raw_light_pdf = get_light_pdf(light, obj, ray.origin, ray.direction);
+        let raw_light_pdf = get_light_pdf(light, obj, ray.origin, ray.direction, hit);
         let to_light = obj.world_position - ray.origin;
         let d2 = max(dot(to_light, to_light), 0.001);
         let light_importance = light.power / d2;
@@ -2178,8 +2334,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
       }
       let incoming = ctx.emittance.rgb * weight;
       radiance += throughput * clamp_firefly(incoming, bounce);
-      if (HAS_LIGHTS && hit.o_idx > 0 && obj.light_idx >= 0) { break; }
-      else if (length(ctx.emittance) > 1.0) { break; }
+      //if (HAS_LIGHTS && hit.o_idx > 0 && obj.light_idx >= 0) { break; }
+      //else 
+      if (length(ctx.emittance) > 1.0) { break; }
     }
 
     let hit_pos = ray.origin + ray.direction * hit.t;
