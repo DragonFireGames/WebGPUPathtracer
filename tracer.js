@@ -1940,7 +1940,9 @@ class Renderer {
     return texArray.createView({ dimension: '2d-array' });
   }
 
-  async setScene(scene) {
+  async setScene(scene, isgbuf = false) {
+    this.isgbuf = isgbuf;
+
     this.scene = scene;
     const { canvas, device } = this;
 
@@ -2050,7 +2052,7 @@ class Renderer {
       layout: 'auto', 
       compute: { 
         module: shaderModule, 
-        entryPoint: 'main',
+        entryPoint: isgbuf ? 'gbuf_main' :'main',
         constants: {
           0: scene.bounces,
           1: f.hasSpheres ? 1 : 0, 
@@ -2101,14 +2103,17 @@ class Renderer {
         { binding: 7, resource: { buffer: this.buffers.bvh } },
         { binding: 8, resource: { buffer: this.buffers.triangle } },
         { binding: 9, resource: { buffer: this.buffers.plane } },
-        { binding: 10, resource: { buffer: this.buffers.light } },
         { binding: 11, resource: this.gpuTextureView },
         { binding: 12, resource: this.sampler },
         { binding: 13, resource: this.hdrTextureView },
         { binding: 14, resource: this.skySampler },
+      ].concat(this.isgbuf ? [
+        { binding: 17, resource: { buffer: this.gBuf } }
+      ] : [
+        { binding: 10, resource: { buffer: this.buffers.light } },
         { binding: 15, resource: { buffer: this.buffers.cond } },
-        { binding: 16, resource: { buffer: this.buffers.marg } }
-      ]
+        { binding: 16, resource: { buffer: this.buffers.marg } },
+      ])
     });
     return this.bG;
   }
@@ -2168,6 +2173,14 @@ class Renderer {
       size: width * height * 16, 
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
+
+    if (this.isgbuf) {
+      if (this.gBuf) this.gBuf.destroy();
+      this.gBuf = this.device.createBuffer({
+        size: width * height * 4 * 12,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      });
+    }
 
     // 5. Update the Bind Group
     // Since the texture view and buffer reference changed, we must rebuild the Bind Group
@@ -2283,50 +2296,14 @@ class Renderer {
     pass.end();
   }
 
-  initPreview(targetTime) {
+  async initPreview(targetTime) {
     const { device } = this;
-    const canvasFormat = 'rgba8unorm'; 
 
     this.targetFrameTime = targetTime || 1000 / 60; // 16.6ms for 60 FPS
     this.currentPreviewSize = 128;    // Start size
     this.lastFrameTime = performance.now();
     
-    const scaleShader = `
-      @group(0) @binding(0) var src: texture_2d<f32>;
-      @group(0) @binding(1) var dest: texture_storage_2d<${canvasFormat}, write>;
-      @group(0) @binding(2) var<uniform> ratio: vec2f;
-
-      @compute @workgroup_size(16, 16)
-      fn main(@builtin(global_invocation_id) id: vec3u) {
-        let dstSize = textureDimensions(dest);
-        if (id.x >= dstSize.x || id.y >= dstSize.y) { return; }
-
-        let srcSize = vec2f(textureDimensions(src));
-        
-        // Calculate continuous coordinates in the source texture
-        let uv = vec2f(id.xy) / vec2f(dstSize);
-        let samplePos = uv * ratio * srcSize - 0.5;
-        
-        // Get the integer coordinates of the 4 neighbors
-        let f = fract(samplePos);
-        let base = vec2i(floor(samplePos));
-
-        // Fetch 4 neighboring pixels (clamped to prevent edge bleeding)
-        let t00 = textureLoad(src, clamp(base + vec2i(0, 0), vec2i(0), vec2i(srcSize) - 1), 0);
-        let t10 = textureLoad(src, clamp(base + vec2i(1, 0), vec2i(0), vec2i(srcSize) - 1), 0);
-        let t01 = textureLoad(src, clamp(base + vec2i(0, 1), vec2i(0), vec2i(srcSize) - 1), 0);
-        let t11 = textureLoad(src, clamp(base + vec2i(1, 1), vec2i(0), vec2i(srcSize) - 1), 0);
-
-        // Bilinear interpolation math
-        let color = mix(
-          mix(t00, t10, f.x),
-          mix(t01, t11, f.x),
-          f.y
-        );
-        
-        textureStore(dest, id.xy, vec4f(color.rgb, 1.0));
-      }
-    `;
+    const scaleShader = await loadText('scale.wgsl');
 
     this.blitScaleBuf = device.createBuffer({
       size: 8,
@@ -2424,6 +2401,227 @@ class Renderer {
 
     device.queue.submit([encoder.finish()]);
     console.log("Cleared!");
+  }
+}
+class Denoiser {
+  constructor(renderer) {
+    this.r = renderer; 
+    this.device = renderer.device;
+    
+    // Default optimized parameters from our previous testing
+    this.passes = 4;
+    this.sigmaColor = 0.30;
+    this.sigmaNormal = 128.0;
+    this.sigmaDepth = 0.2;
+    this.sigmaAlbedo = 0.07;
+    this.sigmaMaterial = 0.07;
+    this.glossyProtect = 0.75;
+    this.exposure = renderer.scene.camera.exposure;
+    
+    // Feature flags
+    this.useMedian = true;
+    this.useDemodulate = true;
+
+    this.bufA = null;
+    this.bufB = null;
+    this.uBuf = null;
+    
+    // 48 bytes (12 * 4 bytes) for uniform parameters
+    this.uBufData = new ArrayBuffer(48); 
+    
+    this.prepassPipe = null;
+    this.atrousPipe = null;
+    this.compositePipe = null;
+  }
+
+  async init() {
+    // Single monolithic shader containing all 3 passes to easily share structs
+    const denoiserWgsl = await loadText('denoiser.wgsl');
+
+    this.module = this.device.createShaderModule({ code: denoiserWgsl });
+    
+    // Check for compilation errors
+    const info = await this.module.getCompilationInfo();
+    if (info.messages.length > 0) {
+      console.error("Denoiser WGSL Compilation Messages:");
+      for (const m of info.messages) {
+        console.warn(`Line ${m.lineNum}:${m.linePos} - ${m.message}`);
+      }
+    }
+
+    this.prepassPipe = this.device.createComputePipeline({
+      layout: 'auto', compute: { module: this.module, entryPoint: 'prepass_main' }
+    });
+
+    this.atrousPipe = this.device.createComputePipeline({
+      layout: 'auto', compute: { module: this.module, entryPoint: 'atrous_main' }
+    });
+
+    this.compositePipe = this.device.createComputePipeline({
+      layout: 'auto', compute: { module: this.module, entryPoint: 'composite_main' }
+    });
+
+    this.uBuf = this.device.createBuffer({
+      size: 48, 
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+  }
+
+  setupBuffers() {
+    const { device, r } = this;
+    const width = r.canvas.width;
+    const height = r.canvas.height;
+    const pixelCount = width * height;
+
+    if (this.bufA) this.bufA.destroy();
+    this.bufA = device.createBuffer({
+      size: pixelCount * 16,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+    });
+
+    if (this.bufB) this.bufB.destroy();
+    this.bufB = device.createBuffer({
+      size: pixelCount * 16,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+    });
+
+    // -----------------------------------------------------
+    // Create explicitly targeted Bind Groups for each pass
+    // -----------------------------------------------------
+    
+    // Prepass: Reads Renderer's Accumulation Buffer -> Writes BufA
+    this.bgPrepass = device.createBindGroup({
+      layout: this.prepassPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uBuf } },
+        { binding: 1, resource: { buffer: r.aBuf } },
+        { binding: 2, resource: { buffer: r.gBuf } },
+        { binding: 3, resource: { buffer: this.bufA } }
+      ]
+    });
+
+    // Atrous Ping-Pong A: Reads BufA -> Writes BufB
+    this.bgAtrousA = device.createBindGroup({
+      layout: this.atrousPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uBuf } },
+        { binding: 1, resource: { buffer: this.bufA } },
+        { binding: 2, resource: { buffer: r.gBuf } },
+        { binding: 3, resource: { buffer: this.bufB } }
+      ]
+    });
+
+    // Atrous Ping-Pong B: Reads BufB -> Writes BufA
+    this.bgAtrousB = device.createBindGroup({
+      layout: this.atrousPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uBuf } },
+        { binding: 1, resource: { buffer: this.bufB } },
+        { binding: 2, resource: { buffer: r.gBuf } },
+        { binding: 3, resource: { buffer: this.bufA } }
+      ]
+    });
+
+    // Composite A/B: Reads final Buf (A or B) -> Writes final Canvas Texture
+    const outView = r.tex.createView();
+    this.bgCompositeA = device.createBindGroup({
+      layout: this.compositePipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uBuf } },
+        { binding: 1, resource: { buffer: this.bufA } },
+        { binding: 2, resource: { buffer: r.gBuf } },
+        { binding: 4, resource: outView }
+      ]
+    });
+
+    this.bgCompositeB = device.createBindGroup({
+      layout: this.compositePipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uBuf } },
+        { binding: 1, resource: { buffer: this.bufB } },
+        { binding: 2, resource: { buffer: r.gBuf } },
+        { binding: 4, resource: outView }
+      ]
+    });
+  }
+
+  updateUniforms() {
+    const f32 = new Float32Array(this.uBufData);
+    const u32 = new Uint32Array(this.uBufData);
+    
+    u32[0] = this.r.canvas.width;
+    u32[1] = this.r.canvas.height;
+    u32[2] = 1; // Default step_width
+    u32[3] = this.passes;
+    
+    f32[4] = this.sigmaColor;
+    f32[5] = this.sigmaNormal;
+    f32[6] = this.sigmaDepth;
+    f32[7] = this.sigmaAlbedo;
+    f32[8] = this.sigmaMaterial;
+    f32[9] = this.glossyProtect;
+    f32[10] = this.exposure;
+    
+    // Combine feature flags
+    u32[11] = (this.useMedian ? 1 : 0) | (this.useDemodulate ? 2 : 0);
+    
+    this.device.queue.writeBuffer(this.uBuf, 0, this.uBufData);
+  }
+
+  execute() {
+    if (!this.prepassPipe || !this.r.aBuf) return;
+    const { device, r } = this;
+    
+    this.updateUniforms();
+
+    const wX = Math.ceil(r.canvas.width / 16);
+    const wY = Math.ceil(r.canvas.height / 16);
+    const encoder = device.createCommandEncoder();
+    
+    // -----------------------------------------------------
+    // 1. PREPASS (Median & Demodulate)
+    // -----------------------------------------------------
+    const prepass = encoder.beginComputePass();
+    prepass.setPipeline(this.prepassPipe);
+    prepass.setBindGroup(0, this.bgPrepass);
+    prepass.dispatchWorkgroups(wX, wY);
+    prepass.end();
+
+    // -----------------------------------------------------
+    // 2. À-TROUS WAVELET PASSES
+    // -----------------------------------------------------
+    for (let i = 0; i < this.passes; i++) {
+      const stepSize = 1 << i; // 1, 2, 4, 8, 16...
+      
+      // Update just the step_width in the uniform buffer (offset 8 bytes)
+      device.queue.writeBuffer(this.uBuf, 8, new Uint32Array([stepSize]));
+
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.atrousPipe);
+      // If i is even: read BufA, write BufB. If odd: read BufB, write BufA.
+      pass.setBindGroup(0, i % 2 === 0 ? this.bgAtrousA : this.bgAtrousB);
+      pass.dispatchWorkgroups(wX, wY);
+      pass.end();
+    }
+
+    // -----------------------------------------------------
+    // 3. FINAL COMPOSITE (Remodulate & Tonemap)
+    // -----------------------------------------------------
+    const comp = encoder.beginComputePass();
+    comp.setPipeline(this.compositePipe);
+    // Bind the buffer that contains the final denoised result
+    comp.setBindGroup(0, this.passes % 2 === 0 ? this.bgCompositeA : this.bgCompositeB);
+    comp.dispatchWorkgroups(wX, wY);
+    comp.end();
+
+    // 4. Output to screen
+    encoder.copyTextureToTexture(
+      { texture: r.tex }, 
+      { texture: r.context.getCurrentTexture() }, 
+      [r.canvas.width, r.canvas.height]
+    );
+    
+    device.queue.submit([encoder.finish()]);
   }
 }
 

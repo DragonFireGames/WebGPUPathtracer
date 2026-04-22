@@ -1604,7 +1604,7 @@ async function openRenderPopup() {
 
   renderer = new Renderer(canvas);
   await renderer.init();
-  renderer.initPreview(100);
+  await renderer.initPreview(100);
 
   const scene = State.scene;
   updateScene(scene);
@@ -1673,8 +1673,10 @@ async function SaveRender(name) {
   ctx.putImageData(imageData, 0, 0);
 
   const link = document.createElement('a');
-  link.download = (name || 'render') + '.jpeg';
-  link.href = tempCanvas.toDataURL('image/jpeg', 0.95);
+  link.download = (name || 'render') + '.png';
+  link.href = tempCanvas.toDataURL('image/png', 1.0);
+  // link.download = (name || 'render') + '.jpeg';
+  // link.href = tempCanvas.toDataURL('image/jpeg', 0.95);
   link.click();
   
   console.log("Render saved successfully");
@@ -1767,6 +1769,7 @@ async function startRender() {
   tsize = Number(prompt("Enter tile size:",tsize)||tsize);
   const tilesVisible = Number(confirm("Watch tiles?:"));
   const spp = Number(prompt("Samples per pixel:","1024")||1024);
+  var gbuf = !confirm("Cancel to render gbuf");
 
   const canvas = document.getElementById('gpuCanvas');
   const status = document.getElementById('render-stats');
@@ -1779,7 +1782,25 @@ async function startRender() {
   //var scene = await SceneList[SelectedScene].create(canvas);
   const scene = State.scene;
   updateScene(scene);
-  await renderer.setScene(scene);
+  await renderer.setScene(scene, gbuf);
+
+  var denoiser;
+  if (gbuf) {
+    status.innerText = 'Status: Rendering Buffers...';
+
+    denoiser = new Denoiser(renderer);
+    renderer.denoiser = denoiser;
+
+    await renderer.render(tsize,1,tilesVisible);
+
+    await wait(3000);
+
+    renderer.reset();
+    await renderer.setScene(scene, false);
+
+    await denoiser.init();
+    denoiser.setupBuffers();
+  }
 
   sceneLoaded = true;
   status.innerText = 'Status: Rendering...';
@@ -1788,7 +1809,12 @@ async function startRender() {
   var saved = false;
   var renderStartTime = performance.now();
   renderActive = async function() {
-    await renderer.render(tsize,reps,tilesVisible);
+    if (!gbuf || renderer.frame < spp) await renderer.render(tsize,reps,tilesVisible);
+    if (gbuf && renderer.frame >= spp) {
+      denoiser.execute();
+      await renderer.device.queue.onSubmittedWorkDone();
+      await wait(1000);
+    }
     sppElement.innerText = renderer.frame;
     updateProgressBar(renderer.frame/spp,renderStartTime);
     if (renderer.frame > spp && !saved) {

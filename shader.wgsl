@@ -14,6 +14,7 @@
 const PI: f32 = 3.14159265359;
 const TWO_PI: f32 = 6.28318530718;
 const INFINITY: f32 = 65504.0;
+const STACK_SIZE: u32 = 64;
 
 struct Ray {
   origin: vec3f,
@@ -480,7 +481,7 @@ fn trace_mesh(ray_world: Ray, mesh: MeshInstance, hit: ptr<function, SurfaceHit>
   ray_local.direction = (mesh.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
   
   let inv_dir = 1.0 / ray_local.direction;
-  var stack: array<u32, 64>; 
+  var stack: array<u32, STACK_SIZE>; 
   var stack_ptr: i32 = 0;
   
   stack[0] = mesh.node_offset; // Start at root node for this mesh
@@ -697,7 +698,7 @@ fn trace_torus(ray: Ray, tor: Torus, hit: ptr<function, SurfaceHit>, idx: i32) {
 fn trace_tlas(ray: Ray, hit: ptr<function, SurfaceHit>) {
   let inv_dir = 1.0 / ray.direction;
 
-  var stack: array<u32, 64>; 
+  var stack: array<u32, STACK_SIZE>; 
   var stack_ptr: i32 = 0;
   
   stack[0] = 0;
@@ -819,7 +820,7 @@ fn trace_mesh_shadow(ray_world: Ray, mesh: MeshInstance, target_dist: f32, shado
   ray_local.direction = (mesh.inv_matrix * vec4f(ray_world.direction, 0.0)).xyz;
   let inv_dir = 1.0 / ray_local.direction;
 
-  var stack: array<u32, 64>;
+  var stack: array<u32, STACK_SIZE>;
   var stack_ptr: i32 = 0;
   stack[0] = mesh.node_offset;
   stack_ptr++;
@@ -1136,7 +1137,7 @@ fn trace_torus_shadow(ray_world: Ray, tor: Torus, target_dist: f32, shadow: ptr<
 
 fn trace_tlas_shadow(ray: Ray, target_idx: i32, target_dist: f32, shadow: ptr<function, vec3f>) -> bool {
   let inv_dir = 1.0 / ray.direction;
-  var stack: array<u32, 64>;
+  var stack: array<u32, STACK_SIZE>;
   var stack_ptr: i32 = 0;
   stack[stack_ptr] = 0u;
   stack_ptr++;
@@ -1416,16 +1417,21 @@ fn get_surface_context(hit: SurfaceHit, mat: Material, tbn: mat3x3f, uv: vec2f) 
   }
 
   // 3. Resolve Roughness
-  ctx.roughness = mat.roughness;
-  if (mat.roughness_idx >= 0) {
-    ctx.roughness *= sample_texture(mat.roughness_idx, uv).g;
-  }
-
   // 4. Resolve Metallic
   ctx.metallic = mat.metallic;
-  if (mat.metallic_idx >= 0) {
-    ctx.metallic *= sample_texture(mat.metallic_idx, uv).b;
-  }
+  ctx.roughness = mat.roughness;
+  // if (mat.roughness_idx == mat.metallic_idx) {
+  //   let arm = sample_texture(mat.roughness_idx, uv);
+  //   ctx.roughness *= arm.g;
+  //   ctx.metallic *= arm.b;
+  // } else {
+    if (mat.roughness_idx >= 0) {
+      ctx.roughness *= sample_texture(mat.roughness_idx, uv).g;
+    }
+    if (mat.metallic_idx >= 0) {
+      ctx.metallic *= sample_texture(mat.metallic_idx, uv).b;
+    }
+  // }
 
   // 5. Resolve Emittance (Color * Texture)
   ctx.emittance = mat.emittance;
@@ -2280,7 +2286,7 @@ fn main(@builtin(global_invocation_id) sid: vec3u) {
   rand_pcg();
 
   let screen_uv = (vec2f(id.xy) + vec2f(rand_pcg(), rand_pcg())) / vec2f(f32(params.width), f32(params.height));
-  // let screen_uv = (vec2f(id.xy) + vec2f(0.5)) / vec2f(f32(params.width), f32(params.height)); // no aliasing
+  // let screen_uv = (vec2f(id.xy) + vec2f(0.5)) / vec2f(f32(params.width), f32(params.height)); // no anti-aliasing
   let ray_dir = normalize(mix(mix(params.ray00, params.ray10, screen_uv.x), mix(params.ray01, params.ray11, screen_uv.x), 1.-screen_uv.y));
   var ray = Ray(params.eye, ray_dir);
 
@@ -2488,3 +2494,115 @@ fn main(@builtin(global_invocation_id) sid: vec3u) {
   
   textureStore(output_tex, id.xy, vec4f(final_c, 1.0));
 }
+
+
+// Get gbuffer data
+
+struct GBufferData {
+  normal: vec3f,
+  roughness: f32,
+  albedo: vec3f,
+  metallic: f32,
+  motion: vec2f,
+  transmission: f32,
+  dist: f32,
+};
+
+// The new buffer for the Denoiser
+@group(0) @binding(17) var<storage, read_write> g_buffer: array<GBufferData>;
+
+@compute @workgroup_size(16, 16)
+fn gbuf_main(@builtin(global_invocation_id) sid: vec3u) {
+  let id = params.section + sid.xy;
+  if (id.x >= params.width || id.y >= params.height) { return; }
+  let idx = id.y * params.width + id.x;
+  
+  //rng_state = idx + params.sample_number * 912373u;
+  rng_state = (idx * 1973u + params.sample_number * 9277u + params.seed * 26699u) | 1u;
+  //rng_state = (idx ^ (params.sample_number * 912373u) ^ (params.seed * 26699u)) | 1u;
+  rand_pcg();
+
+  _ = params;
+  _ = accum_buffer[0];
+  _ = output_tex;
+
+  let screen_uv = (vec2f(id.xy) + vec2f(0.5)) / vec2f(f32(params.width), f32(params.height)); // no aliasing
+  let ray_dir = normalize(mix(mix(params.ray00, params.ray10, screen_uv.x), mix(params.ray01, params.ray11, screen_uv.x), 1.-screen_uv.y));
+  var ray = Ray(params.eye, ray_dir);
+
+  var hit: SurfaceHit;
+  var first_hit: SurfaceHit;
+  var ctx: SurfaceContext;
+  var first_ctx: SurfaceContext;
+  var mat: Material;
+  var dist = 0.0;
+  var first = true;
+
+  var tint = vec3f(1.);
+  for (var bounce = 0; bounce < BOUNCE_LIMIT; bounce++) {
+    hit = trace_scene(ray); 
+    if (hit.m_idx == -1) {
+      ctx.normal = vec3f(0.0);
+      ctx.emittance = sample_sky(ray.direction);
+      ctx.albedo = vec3f(0.0);
+      first_ctx = ctx;
+      break;
+    }
+    mat = materials[hit.m_idx];
+    let tbn = mat3x3f(hit.tangent, hit.bitangent, hit.hit_n);
+    var final_uv = hit.hit_uv * mat.uv_scale;
+    ctx = get_surface_context(hit, mat, tbn, final_uv);
+    ctx.normal = select(-ctx.normal, ctx.normal, dot(ctx.normal, -ray.direction) > 0.0);
+    dist += hit.t;
+    if (ctx.alpha < 1) {
+      tint *= mix(vec3f(1.0), ctx.albedo, ctx.alpha);
+      ray.origin = ray.origin + ray.direction * hit.t - ctx.normal * 0.001;
+      continue;
+    }
+    if (first) {
+      first_ctx = ctx;
+      first_hit = hit;
+      first = false;
+    }
+    if (mat.metallic >= 0.99 && mat.roughness <= 0.01) {
+      tint *= ctx.albedo;
+      ray.origin = ray.origin + ray.direction * hit.t + ctx.normal * 0.001;
+      ray.direction = reflect(ray.direction, ctx.normal);
+      continue;
+    }
+    break;
+  }
+
+  var color = (ctx.albedo + ctx.emittance) * tint;
+  
+  g_buffer[idx].normal = ctx.normal;
+  g_buffer[idx].albedo = color;
+  g_buffer[idx].dist = dist;
+  g_buffer[idx].transmission = mat.transmission;
+  g_buffer[idx].roughness = ctx.roughness;
+  g_buffer[idx].metallic = ctx.metallic;
+
+  if (id.x < params.width * 1 / 4) {
+    dist = dist / (dist + 3.0);
+    textureStore(output_tex, id.xy, vec4f(vec3f(dist), 1.0));
+    //textureStore(output_tex, id.xy, vec4f(vec3f(hit.t/50.0), 1.0));
+    //textureStore(output_tex, id.xy, vec4f(ray.origin + hit.t * ray.direction, 1.0));
+  } else if (id.x < params.width * 2 / 4) {
+    textureStore(output_tex, id.xy, vec4f(ctx.normal * 0.5 + vec3f(0.5), 1.0));
+  } else if (id.x < params.width * 3 / 4) {
+    color *= vec3f(params.exposure);
+    color = color / (color + vec3(0.3));
+    color = pow(color, vec3f(0.4545));
+    textureStore(output_tex, id.xy, vec4f(color, 1.0));
+  } else {
+    textureStore(output_tex, id.xy, vec4f(vec3f(mat.transmission,ctx.roughness,ctx.metallic), 1.0));
+  }
+  // hit.hit_uv = fract(hit.hit_uv); textureStore(output_tex, id.xy, vec4f(hit.hit_uv.x,hit.hit_uv.y,1. - hit.hit_uv.x * hit.hit_uv.y, 1.0));
+  // textureStore(output_tex, id.xy, vec4f(vec3f(pow(0.97,f32(hit.count))),1.0));
+  // return;
+
+  //var shadow = trace_scene_shadow(ray, -1, 10);
+  //textureStore(output_tex, id.xy, vec4f(shadow, 1.0));
+  //return;
+}
+
